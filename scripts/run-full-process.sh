@@ -1,18 +1,29 @@
 #!/bin/bash
-# Main orchestration script
+# Main orchestration script. Runs a migration pass, then a fixing pass over whatever is
+# already labeled plan-approved (typically nothing yet, right after a fresh migration -
+# that label is added by a human after reviewing the RCA report on each issue).
+#
+# Usage: ./run-full-process.sh [--limit N] [--live] [--branch <name>]
+# --branch applies to every bug processed in this invocation (default "main") - if bugs need
+# different base branches, run separately per branch/group of bugs.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../configs/system.conf"
-source "$SCRIPT_DIR/../configs/credentials.conf"
+source "$SCRIPT_DIR/lib/common.sh"
+parse_common_args "$@"
+
+ARGS=()
+[ "$LIVE" = true ] && ARGS+=(--live)
+ARGS+=(--branch "$BASE_BRANCH")
 
 echo "Starting Bug Management System..."
 
-# Phase 1: Migration
 echo "Phase 1: Bug Migration"
-# ./scripts/get-ado-bugs.sh
+"$SCRIPT_DIR/start-bug-migration.sh" --limit "$LIMIT" "${ARGS[@]}"
 
-# Phase 2: Fixing
 echo "Phase 2: Bug Fixing"
-# ./scripts/start-bug-fixing.sh
+"$SCRIPT_DIR/get-ready-issues.sh" --limit "$LIMIT"
+"$SCRIPT_DIR/start-bug-fixing.sh" "${ARGS[@]}"
+"$SCRIPT_DIR/new-pull-request.sh" "${ARGS[@]}"
+"$SCRIPT_DIR/verify-bug-fixes.sh"
 
 echo "Bug Management System process completed!"

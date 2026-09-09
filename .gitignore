@@ -7,6 +7,13 @@ logs/
 # Temporary files
 temp/
 
+# Run state (ADO<->GitHub mapping, per-issue verification results)
+state/
+
+# Pipeline working files written to the repo root by scripts
+/ado-bugs.json
+/ready-issues.json
+
 # IDE files
 .vscode/
 .idea/
