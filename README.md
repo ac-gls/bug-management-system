@@ -53,8 +53,8 @@ invocation and isn't persisted anywhere.
 - `scripts/` - automation scripts (`scripts/lib/` has shared helpers: `common.sh` for
   config/state/worktrees, `herdr.sh` for driving Claude Code agents through Herdr panes)
 - `configs/` - `system.conf` (org/repo/ADO settings) and `credentials.conf` (gitignored tokens)
-- `docs/` - design docs (see note below - these predate the real implementation and describe a
-  broader fixing/PR workflow this repo no longer implements)
+- `docs/` - user guide, process summary, migration process, troubleshooting, and a from-scratch
+  setup walkthrough (see Documentation below)
 - `state/` - `ado-to-github-map.json` (which ADO bugs have a GitHub issue, or are `BLOCKED`)
 - `logs/`, `temp/` - runtime output
 - `win-scripts/` - Windows batch wrappers
@@ -98,15 +98,13 @@ were created and the shared worktree was cleaned up).
 
 ## Documentation
 - [User Guide](docs/user-guide.md)
-- [Troubleshooting Guide](docs/troubleshooting.md)
+- [Process Summary](docs/process-summary.md)
 - [Migration Process](docs/migration-process.md)
+- [Troubleshooting Guide](docs/troubleshooting.md)
+- [Setup Guide](docs/setup-guide.md) - a from-scratch install walkthrough; still illustrative in
+  places (some snippets predate the real scripts) rather than a byte-for-byte mirror of them
 
-> **Note:** the docs above describe the original design (fictional `herdr agent start name --
-> bash script.sh` job-runner syntax, `az boards work-item list`, hand-rolled RCA/TDD/Playwright
-> templates, and a fixing/PR phase this repo no longer implements). The real implementation in
-> `scripts/` diverges from them where the real `herdr` and `az` CLIs, and the target repo's
-> existing subagents, made a different approach both correct and considerably simpler. Treat
-> `scripts/*.sh` header comments as authoritative.
+If any doc and the actual code disagree, `scripts/*.sh` header comments are authoritative.
 
 ## Contributing
 1. Fork the repository

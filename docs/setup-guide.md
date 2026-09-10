@@ -3,6 +3,11 @@
 ## Overview
 This plan provides a complete guide for installing and configuring the entire bug management system on any Windows computer. The system will be set up in a separate Git repository with all necessary tools, configurations, and automation scripts.
 
+> **Note:** this walks through building the system from scratch and predates some of the real
+> implementation's details. Where this doc and the actual scripts disagree, the scripts win -
+> see `README.md` for the current, authoritative directory/script list and scope (ADO ->
+> GitHub issue creation only; there is no fixing/PR phase).
+
 ## Prerequisites
 - Windows 10 or Windows 11 computer
 - Administrator privileges
@@ -45,8 +50,8 @@ sudo apt install -y python3 python3-pip
 ### Step 5: Create Bug Management Repository
 ```bash
 # In Ubuntu terminal:
-mkdir -p ~/projects
-cd ~/projects
+mkdir -p ~/source/repos
+cd ~/source/repos
 git init bug-management-system
 cd bug-management-system
 ```
@@ -65,11 +70,10 @@ touch README.md .gitignore
 This repository contains all scripts and configurations for the automated bug management system that integrates Azure DevOps and GitHub.
 
 ## Features
-- Automated bug migration from ADO to GitHub
-- Parallel bug fixing with Herdr
-- TDD implementation with Playwright testing
-- Dual-system status synchronization
-- Comprehensive reporting and traceability
+- Automated ADO bug investigation and GitHub tracking issue creation
+- Parallel investigation via Herdr-driven Claude Code agents, sharing one read-only worktree
+- ADO comment-back on blockers or completed migrations
+- State tracking to avoid duplicate/re-processed bugs
 
 ## Directories
 - `scripts/` - All automation scripts
@@ -137,27 +141,39 @@ az login
 
 ### Step 15: Create Configuration Files
 
-#### Create configs/system.conf:
+#### Create configs/system.conf (see the real, current version for the exact fields in use):
 ```bash
 # System configuration
-WORKSPACE_ROOT="$HOME/projects/bug-management-system"
+WORKSPACE_ROOT="$HOME/source/repos/bug-management-system"
 LOG_DIR="$WORKSPACE_ROOT/logs"
 TEMP_DIR="$WORKSPACE_ROOT/temp"
 SCRIPTS_DIR="$WORKSPACE_ROOT/scripts"
 CONFIGS_DIR="$WORKSPACE_ROOT/configs"
+STATE_DIR="$WORKSPACE_ROOT/state"
 
 # GitHub settings
 GITHUB_ORG="your-organization"
 GITHUB_REPO="your-repo"
 
+# Target application repo (kept separate from any other local working copy)
+APP_REPO_URL="https://github.com/your-organization/your-repo"
+APP_REPO_DIR="$HOME/source/repos/your-app-checkout"
+APP_WORKTREE_DIR="$HOME/source/repos/your-app-checkout-worktrees"
+
 # Azure DevOps settings
-ADO_ORG="your-ado-organization"
+ADO_ORG="https://dev.azure.com/your-ado-organization"
 ADO_PROJECT="your-ado-project"
 
 # Migration settings
 MIGRATION_TAG="MigrateToGitHub"
-READY_FOR_AGENT_TAG="ready-for-agent"
+
+# Herdr agent settings
+HERDR_AGENT_KIND="claude"
+HERDR_AGENT_TIMEOUT_MS="1800000"
 ```
+
+There is no "ready for agent"/approval label in this system's config - that concept belonged to
+the fixing/PR phase, which this repo no longer implements.
 
 #### Create configs/credentials.conf:
 ```bash
@@ -222,8 +238,8 @@ echo "Herdr setup completed!"
 #!/bin/bash
 # Authenticate with required services
 
-source "$HOME/projects/bug-management-system/configs/system.conf"
-source "$HOME/projects/bug-management-system/configs/credentials.conf"
+source "$HOME/source/repos/bug-management-system/configs/system.conf"
+source "$HOME/source/repos/bug-management-system/configs/credentials.conf"
 
 echo "Authenticating with GitHub..."
 echo "$GITHUB_TOKEN" | gh auth login --with-token
@@ -237,61 +253,35 @@ echo "Authentication completed!"
 ### Step 17: Create Migration Scripts
 
 #### Create scripts/get-ado-bugs.sh:
-```bash
-#!/bin/bash
-# Script from the previous migration plan
 
-source "$HOME/projects/bug-management-system/configs/system.conf"
-source "$HOME/projects/bug-management-system/configs/credentials.conf"
-
-ORGANIZATION=${1:-$ADO_ORG}
-PROJECT=${2:-$ADO_PROJECT}
-MIGRATION_TAG=${3:-$MIGRATION_TAG}
-
-# Implementation from previous plan...
-```
-
-### Step 18: Create Fixing Scripts
-
-#### Create scripts/start-bug-fixing.sh:
-```bash
-#!/bin/bash
-# Script from the previous bug fixing plan
-
-source "$HOME/projects/bug-management-system/configs/system.conf"
-source "$HOME/projects/bug-management-system/configs/credentials.conf"
-
-STATUS_LABEL=${1:-$READY_FOR_AGENT_TAG}
-
-# Implementation from previous plan...
-```
+See the real script for the current implementation (a WIQL query via `az boards query`, with
+state-file-based skip logic for already-migrated/blocked bugs) - it's more involved than a
+placeholder snippet would usefully convey. Full behavior is documented in `migration-process.md`
+and the script's own header comment.
 
 ## Phase 6: System Integration
 
-### Step 19: Create Main Orchestration Script
+### Step 18: Create Main Orchestration Script
 
 #### Create scripts/run-full-process.sh:
 ```bash
 #!/bin/bash
-# Main orchestration script
+# Main entry point - queries ADO, investigates each tagged bug in parallel, and creates a
+# GitHub tracking issue (or comments back on ADO if the agent hit a blocker). No fixing/PR
+# phase - a human takes it from the tracking issue onward.
 
-source "$HOME/projects/bug-management-system/configs/system.conf"
-source "$HOME/projects/bug-management-system/configs/credentials.conf"
+source "$HOME/source/repos/bug-management-system/configs/system.conf"
+source "$HOME/source/repos/bug-management-system/configs/credentials.conf"
 
 echo "Starting Bug Management System..."
-
-# Phase 1: Migration
-echo "Phase 1: Bug Migration"
-./scripts/get-ado-bugs.sh
-
-# Phase 2: Fixing
-echo "Phase 2: Bug Fixing"
-./scripts/start-bug-fixing.sh
-
+./scripts/start-bug-migration.sh --limit "$LIMIT" "$@"
 echo "Bug Management System process completed!"
 ```
 
-### Step 20: Create Utility Scripts
+See the real `scripts/run-full-process.sh` and `scripts/start-bug-migration.sh` for the actual,
+current implementation (argument parsing, dry-run default, etc.) - this snippet is illustrative.
+
+### Step 19: Create Utility Scripts
 
 #### Create scripts/status-check.sh:
 ```bash
@@ -318,13 +308,13 @@ echo "System status check completed!"
 
 ## Phase 7: Windows Integration
 
-### Step 21: Create Windows Launcher
+### Step 20: Create Windows Launcher
 
 #### Create win-scripts/launch-bug-system.bat:
 ```batch
 @echo off
 echo Launching Bug Management System...
-wsl -d Ubuntu -e bash -c "cd ~/projects/bug-management-system && ./scripts/run-full-process.sh"
+wsl -d Ubuntu -e bash -c "cd ~/source/repos/bug-management-system && ./scripts/run-full-process.sh"
 pause
 ```
 
@@ -332,13 +322,13 @@ pause
 ```batch
 @echo off
 echo Setting up Bug Management System...
-wsl -d Ubuntu -e bash -c "cd ~/projects/bug-management-system && ./scripts/install-dependencies.sh"
+wsl -d Ubuntu -e bash -c "cd ~/source/repos/bug-management-system && ./scripts/install-dependencies.sh"
 pause
 ```
 
 ## Phase 8: Documentation
 
-### Step 22: Create User Guide
+### Step 21: Create User Guide
 
 #### Create docs/user-guide.md:
 ```markdown
@@ -362,7 +352,7 @@ Execute the main script:
 ./scripts/run-full-process.sh
 ```
 
-### Step 23: Create Troubleshooting Guide
+### Step 22: Create Troubleshooting Guide
 
 #### Create docs/troubleshooting.md:
 ```markdown
@@ -385,7 +375,7 @@ Execute the main script:
 
 ## Phase 9: Security and Backup
 
-### Step 24: Secure Configuration Files
+### Step 23: Secure Configuration Files
 
 #### Update .gitignore:
 ```gitignore
@@ -412,27 +402,27 @@ ehthumbs.db
 Thumbs.db
 ```
 
-### Step 25: Create Backup Script
+### Step 24: Create Backup Script
 
 #### Create scripts/backup-config.sh:
 ```bash
 #!/bin/bash
 # Backup configuration files
 
-BACKUP_DIR="$HOME/projects/bug-management-system/backups"
+BACKUP_DIR="$HOME/source/repos/bug-management-system/backups"
 DATE=$(date +%Y%m%d_%H%M%S)
 
 mkdir -p "$BACKUP_DIR"
 
 # Backup configuration files
-cp -r "$HOME/projects/bug-management-system/configs" "$BACKUP_DIR/configs_$DATE"
+cp -r "$HOME/source/repos/bug-management-system/configs" "$BACKUP_DIR/configs_$DATE"
 
 echo "Configuration backed up to $BACKUP_DIR/configs_$DATE"
 ```
 
 ## Phase 10: Testing and Validation
 
-### Step 26: Create Test Scripts
+### Step 25: Create Test Scripts
 
 #### Create scripts/test-installation.sh:
 ```bash
@@ -443,9 +433,9 @@ echo "Testing Bug Management System Installation..."
 
 # Test 1: Check directory structure
 echo "Test 1: Directory structure"
-if [ -d "$HOME/projects/bug-management-system/scripts" ] && 
-   [ -d "$HOME/projects/bug-management-system/configs" ] &&
-   [ -d "$HOME/projects/bug-management-system/docs" ]; then
+if [ -d "$HOME/source/repos/bug-management-system/scripts" ] && 
+   [ -d "$HOME/source/repos/bug-management-system/configs" ] &&
+   [ -d "$HOME/source/repos/bug-management-system/docs" ]; then
     echo "✓ Directory structure OK"
 else
     echo "✗ Directory structure missing"
@@ -467,7 +457,7 @@ fi
 
 # Test 3: Check configuration files
 echo "Test 3: Configuration files"
-if [ -f "$HOME/projects/bug-management-system/configs/system.conf" ]; then
+if [ -f "$HOME/source/repos/bug-management-system/configs/system.conf" ]; then
     echo "✓ System configuration exists"
 else
     echo "✗ System configuration missing"
@@ -478,15 +468,15 @@ echo "Installation testing completed!"
 
 ## Phase 11: Final Setup
 
-### Step 27: Initialize Git Repository
+### Step 26: Initialize Git Repository
 ```bash
 # In Ubuntu terminal:
-cd ~/projects/bug-management-system
+cd ~/source/repos/bug-management-system
 git add .
 git commit -m "Initial commit: Bug Management System setup"
 ```
 
-### Step 28: Create Remote Repository
+### Step 27: Create Remote Repository
 ```bash
 # In Ubuntu terminal:
 gh repo create bug-management-system --public --clone
@@ -495,7 +485,7 @@ gh repo create bug-management-system --public --clone
 # git push -u origin main
 ```
 
-### Step 29: Final Validation
+### Step 28: Final Validation
 ```bash
 # In Ubuntu terminal:
 ./scripts/test-installation.sh
@@ -523,7 +513,7 @@ gh repo create bug-management-system --public --clone
 
 ### Updating the System
 ```bash
-cd ~/projects/bug-management-system
+cd ~/source/repos/bug-management-system
 git pull origin main
 ./scripts/install-dependencies.sh
 ```
