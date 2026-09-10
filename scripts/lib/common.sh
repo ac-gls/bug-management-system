@@ -62,6 +62,26 @@ ensure_app_clone() {
     git -C "$APP_REPO_DIR" fetch origin
   fi
   mkdir -p "$APP_WORKTREE_DIR"
+  ensure_required_agents_installed
+}
+
+# bcx-reporting-platform is the source of truth for bcx-bug-rca-agent and bcx-bug-coder-agent
+# (this pipeline just orchestrates worktrees/panes and asks a claude agent to run them by
+# name) - both already exist there under .claude/agents/ and are committed to origin/main, so
+# this is normally a no-op. It's a defensive fallback for a checkout that predates them (an
+# older branch, a fork, APP_REPO_URL pointed elsewhere) using this repo's vendored copies in
+# agents/, so a missing agent fails loudly here instead of confusingly deep inside a herdr
+# pane. Never overwrites a file already present - a repo-side edit to the agent always wins.
+ensure_required_agents_installed() {
+  local dest_dir="$APP_REPO_DIR/.claude/agents" src name
+  mkdir -p "$dest_dir"
+  for src in "$REPO_ROOT"/agents/*.md; do
+    name="$(basename "$src")"
+    if [ ! -f "$dest_dir/$name" ]; then
+      log "Installing missing required agent $name into $dest_dir"
+      cp "$src" "$dest_dir/$name"
+    fi
+  done
 }
 
 # Creates (or reuses) a git worktree for a bug/issue off origin/main.

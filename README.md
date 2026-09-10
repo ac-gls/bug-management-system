@@ -46,6 +46,10 @@ call for the same batch of bugs (migration scripts, then later the fixing-phase 
 the same issues) - a mismatch silently opens the PR against the wrong base.
 
 ## Directories
+- `agents/` - vendored copies of `bcx-bug-rca-agent.md` and `bcx-bug-coder-agent.md`.
+  `bcx-reporting-platform/.claude/agents/` is the source of truth for these; `ensure_app_clone`
+  in `scripts/lib/common.sh` installs a vendored copy into the cloned app repo only if it's
+  missing there (older branch, fork, etc.) - a defensive fallback, not a fork of the real thing.
 - `scripts/` - automation scripts (`scripts/lib/` has shared helpers: `common.sh` for
   config/state/worktrees, `herdr.sh` for driving Claude Code agents through Herdr panes)
 - `configs/` - `system.conf` (org/repo/ADO settings) and `credentials.conf` (gitignored tokens)
