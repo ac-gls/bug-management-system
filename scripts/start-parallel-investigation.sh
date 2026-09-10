@@ -47,6 +47,12 @@
 # nothing written to this worktree persists past the run, and concurrent bugs writing the same
 # memory-bank files would race).
 #
+# UI: each job's `log` output is redirected to its own $TEMP_DIR/log-<ado-id>.txt instead of
+# the main terminal - with several bugs running at once, interleaved raw log lines from every
+# concurrent job were unreadable. The main terminal (the "main" herdr space this script itself
+# runs in, as opposed to each bug's own herdr pane) instead shows a live, continuously-redrawn
+# status table (see scripts/lib/ui.sh) until every bug reaches a terminal status.
+#
 # Usage: ./start-parallel-investigation.sh [--live] [--branch <name>]
 # --branch (default "main") is the origin branch the shared investigation worktree is checked
 # out from - applies to every bug in ado-bugs.json for this run.
@@ -56,6 +62,7 @@
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/herdr.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/ui.sh"
 parse_common_args "$@"
 
 if [ ! -f ado-bugs.json ]; then
@@ -88,17 +95,21 @@ investigate_one() {
   local name="rca-$ado_id"
 
   set_ado_active "$ado_id"
+  set_bug_status "$ado_id" starting "opening pane"
 
   local ws pane
   read -r ws pane <<< "$(herdr_open_pane "$worktree_path" "$name")"
   if [ -z "$pane" ]; then
     log "[$ado_id] Failed to open pane, skipping"
+    set_bug_status "$ado_id" failed "pane-open, see log-$ado_id.txt"
     return 1
   fi
 
+  set_bug_status "$ado_id" starting "starting agent"
   if ! herdr_start_claude "$name" "$pane"; then
     log "[$ado_id] Failed to start claude agent, skipping"
     herdr_close_workspace "$ws"
+    set_bug_status "$ado_id" failed "agent-start, see log-$ado_id.txt"
     return 1
   fi
 
@@ -111,8 +122,10 @@ investigate_one() {
   local prompt="Use the bcx-bug-rca-agent to investigate ADO ticket $ado_id (organization $ADO_ORG, project \"$ADO_PROJECT\") in $GITHUB_ORG/$GITHUB_REPO. There is no GitHub issue for this bug yet. Produce your resolution plan and stop - do not create a tracking issue and do not proceed to implementation; the tracking issue will be created from your report separately. This worktree is shared read-only across every bug investigated in this run and will be deleted once they all finish - do not modify, create, or commit any file except $report_filename, and skip your own Step 3.5 (Banyan Memory Bank knowledge saving) entirely since nothing written here persists. Write the complete report as clean, well-formatted Markdown to a file named $report_filename in the current directory - proper headings, code fences for file paths/snippets, no terminal chrome or box-drawing characters, nothing that isn't meant to appear as the body of a GitHub issue. Start the file with a single top-level heading. When the file is written, reply in chat with just a one-line confirmation - do not repeat the report content in chat. If your own Step 0 Bug Clarity Check fails and you cannot proceed, write that same $report_filename file starting with the exact line 'BLOCKER FOUND' (all caps, nothing before it) followed by the Type/Issue/Detail/Recommendation from your blocker report - do not fabricate a resolution plan when the check fails."
 
   log "[$ado_id] Prompting agent $name..."
+  set_bug_status "$ado_id" investigating "agent running"
   if ! herdr_prompt_and_wait "$name" "$prompt" "$HERDR_AGENT_TIMEOUT_MS"; then
     log "[$ado_id] Agent did not settle in time - leaving pane open for manual inspection (workspace $ws)"
+    set_bug_status "$ado_id" failed "timeout, pane left open (workspace $ws)"
     return 1
   fi
 
@@ -126,6 +139,7 @@ investigate_one() {
     # to actually look at rather than guessing.
     log "[$ado_id] Agent settled but did not write $report_filename - not creating a tracking issue from unverified content. Leaving pane open for manual inspection (workspace $ws)."
     herdr_capture "$name" 500 > "$TEMP_DIR/rca-$ado_id-raw-capture.log"
+    set_bug_status "$ado_id" failed "no report file, pane left open (workspace $ws)"
     return 1
   fi
   cp "$worktree_path/$report_filename" "$report_file"
@@ -135,6 +149,7 @@ investigate_one() {
   # paragraphs); a near-empty file is just as suspicious as a missing one.
   if [ "$(wc -c < "$report_file")" -lt 200 ]; then
     log "[$ado_id] $report_filename exists but is suspiciously small ($(wc -c < "$report_file") bytes) - not creating a tracking issue from it. Leaving pane open for manual inspection (workspace $ws)."
+    set_bug_status "$ado_id" failed "report too small, pane left open (workspace $ws)"
     return 1
   fi
 
@@ -143,6 +158,7 @@ investigate_one() {
   if head -n 1 "$report_file" | grep -q "^BLOCKER FOUND"; then
     log "[$ado_id] Agent hit a blocker - no tracking issue will be created"
     post_ado_blocker_comment "$ado_id" "$report_file"
+    set_bug_status "$ado_id" blocked "needs more info"
     return 0
   fi
 
@@ -150,10 +166,12 @@ investigate_one() {
   issue_number=$(create_tracking_issue "$ado_id" "$title" "$ado_url" "$report_file")
   if [ "$LIVE" = true ]; then
     log "[$ado_id] Tracking issue created: #$issue_number"
+    set_bug_status "$ado_id" issue-created "#$issue_number"
+  else
+    set_bug_status "$ado_id" dry-run "preview in log-$ado_id.txt"
   fi
 }
 
-pids=()
 jq -c '.[]' ado-bugs.json | while read -r bug; do
   ado_id=$(echo "$bug" | jq -r '.id')
   title=$(echo "$bug" | jq -r '.title')
@@ -161,15 +179,37 @@ jq -c '.[]' ado-bugs.json | while read -r bug; do
   echo "$ado_id"$'\t'"$title"$'\t'"$url"
 done > "$TEMP_DIR/investigation-targets.tsv"
 
+pids=()
+ado_ids=()
 while IFS=$'\t' read -r ado_id title url; do
-  investigate_one "$ado_id" "$title" "$url" "$shared_worktree_path" &
+  set_bug_status "$ado_id" queued
+  # Each job's own `log` output goes to its own file instead of the main terminal - with
+  # several bugs running at once, interleaved raw log lines were unreadable. Full detail for
+  # any bug stays in $TEMP_DIR/log-<id>.txt; the main terminal (the "main" herdr space this
+  # script itself runs in) shows the live status table below instead.
+  investigate_one "$ado_id" "$title" "$url" "$shared_worktree_path" > "$TEMP_DIR/log-$ado_id.txt" 2>&1 &
   pids+=($!)
+  ado_ids+=("$ado_id")
 done < "$TEMP_DIR/investigation-targets.tsv"
+
+run_status_ui "${ado_ids[@]}"
 
 failures=0
 for pid in "${pids[@]}"; do
   wait "$pid" || failures=$((failures + 1))
 done
 
-log "Investigation pass complete ($failures failure(s)) - removing shared worktree $shared_worktree_path"
+log "Investigation pass complete ($failures failure(s))"
+for ado_id in "${ado_ids[@]}"; do
+  status_line=$(get_bug_status "$ado_id")
+  case "${status_line%%|*}" in
+    # A live-created issue is fully reviewable on GitHub - nothing further to point at here.
+    # Everything else (dry-run preview, blocker, failure) has its real content only in the
+    # per-bug log, not the status table, so always point at it.
+    issue-created) ;;
+    *) log "[$ado_id] $status_line - see $TEMP_DIR/log-$ado_id.txt" ;;
+  esac
+done
+
+log "Removing shared worktree $shared_worktree_path"
 remove_worktree "$shared_worktree_path"

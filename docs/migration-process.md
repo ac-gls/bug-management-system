@@ -42,6 +42,10 @@ is your team's own process.
 - The pipeline does **not** trust a "settled" agent as proof of real work: it requires the
   report file to actually exist and be a substantial size before acting on it. A missing or
   suspiciously small file leaves the pane open for manual inspection instead of guessing.
+- The terminal you ran the script from shows a live status table (one row per bug, refreshed
+  every couple of seconds) instead of interleaved raw log output from every concurrent job -
+  each bug's own detail (prompts, dry-run previews, blocker content) goes to
+  `temp/log-<ado-id>.txt` instead. See `troubleshooting.md` for reading it during/after a run.
 - Exactly one deterministic outcome follows, decided by script logic - never the agent itself:
   - **Resolution plan produced** -> a GitHub tracking issue is created from the report
     (`create_tracking_issue` in `scripts/lib/common.sh`): title `Fix: <ADO bug title>`, body =

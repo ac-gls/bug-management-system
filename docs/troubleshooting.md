@@ -2,10 +2,22 @@
 
 ## Migration Pipeline Issues
 
+### Reading progress during a run
+
+The main terminal (the one you ran `start-bug-migration.sh`/`start-parallel-investigation.sh`
+from) shows a live-updating table of every bug's status while investigation runs, refreshed
+every couple of seconds. Each bug's own detailed output - agent prompts, dry-run previews,
+blocker comments - goes to `temp/log-<ado-id>.txt` instead, since that's too much content for
+a status table and would otherwise interleave unreadably across concurrent bugs. A bug's status
+line always tells you when to check its log file, and the run's final summary re-lists any bug
+that isn't a cleanly created issue.
+
 ### An agent's pane is left open after a run
 
 `start-parallel-investigation.sh` deliberately leaves a bug's Herdr pane open instead of
-guessing when something looks wrong, so you can inspect what actually happened:
+guessing when something looks wrong, so you can inspect what actually happened. Check that
+bug's `temp/log-<ado-id>.txt` first - it has the same detail that used to print straight to the
+terminal:
 
 - **Agent did not settle in time** - the agent never finished within `HERDR_AGENT_TIMEOUT_MS`
   (default 30 min, `configs/system.conf`). Attach with `herdr session attach default` and check
