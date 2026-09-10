@@ -41,6 +41,11 @@
 # tracking issue) runs as one backgrounded bash job; a final `wait` blocks until all bugs have
 # investigated concurrently, and only then is the shared worktree removed.
 #
+# At most $MAX_PARALLEL_INVESTIGATIONS (configs/system.conf) of these jobs run at once, not
+# every bug's job simultaneously - confirmed live that firing 9 at once starves every pane
+# badly enough that herdr's submitting Enter (and its own recovery retries) never register,
+# so every bug times out having typed its prompt but never submitted it.
+#
 # Report files are named RESOLUTION-PLAN-<ado-id>.md, not a fixed name, since every bug writes
 # into the same shared directory - a fixed name would let concurrent bugs clobber each other's
 # report (this is also why the agent is told to skip its own Step 3.5 knowledge-saving here:
@@ -181,8 +186,14 @@ done > "$TEMP_DIR/investigation-targets.tsv"
 
 pids=()
 ado_ids=()
+max_parallel="${MAX_PARALLEL_INVESTIGATIONS:-4}"
 while IFS=$'\t' read -r ado_id title url; do
   set_bug_status "$ado_id" queued
+  # Cap how many of these run at once (see the Parallelism note above) - block here until a
+  # slot frees up rather than firing every bug's job the instant it's read off the queue.
+  while [ "$(jobs -rp | wc -l)" -ge "$max_parallel" ]; do
+    wait -n
+  done
   # Each job's own `log` output goes to its own file instead of the main terminal - with
   # several bugs running at once, interleaved raw log lines were unreadable. Full detail for
   # any bug stays in $TEMP_DIR/log-<id>.txt; the main terminal (the "main" herdr space this

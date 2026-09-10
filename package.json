@@ -1,0 +1,17 @@
+{
+  "name": "bug-management-system",
+  "version": "1.0.0",
+  "description": "Automates the bridge from Azure DevOps bugs to GitHub tracking issues, using [Herdr](https://herdr.dev) to run real, parallel Claude Code agents per bug. Scope is deliberately narrow: **ADO -> investigated, reviewable GitHub issue.** It does not implement fixes, open PRs, or touch code beyond reading it for investigation. It does **not** re-implement root-cause analysis itself either - it delegates that to the target application repo's own purpose-built subagent (`bcx-bug-rca-agent` in `bcx-reporting-platform/.claude/agents/`), which already encodes that repo's architecture rules and learned-fix history. This repo's job is the plumbing: querying ADO, fanning investigation agents out via Herdr, and creating the tracking issue (or commenting back on ADO) from what they find.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {},
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@types/node": "^22.20.2"
+  }
+}

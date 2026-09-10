@@ -4,8 +4,10 @@
 #   herdr workspace create --cwd <path> --label <text>
 #     -> JSON: .result.workspace.workspace_id, .result.root_pane.pane_id
 #   herdr agent start <name> --kind claude --pane <pane_id> --timeout <ms>
-#   herdr agent send-keys <name> enter        (dismisses the one-time "trust this folder?"
-#     dialog that appears the first time Claude Code opens a brand-new worktree directory)
+#   herdr agent send-keys <name> <down|enter>  (dismisses the one-time "trust this folder?"
+#     dialog that appears the first time Claude Code opens a brand-new worktree directory -
+#     its default-highlighted option is "No, exit", not the trust option, so this must move
+#     down before confirming rather than just pressing enter)
 #   herdr agent prompt <name> "<text>" --wait --timeout <ms>
 #   herdr agent read <name> --source recent-unwrapped --lines <n>
 #   herdr workspace close <workspace_id>
@@ -55,7 +57,16 @@ herdr_start_claude() {
     out=$(herdr agent start "$name" --kind "$HERDR_AGENT_KIND" --pane "$pane" --timeout 45000 2>&1)
     if [ $? -eq 0 ]; then
       sleep 1
-      herdr agent send-keys "$name" enter >/dev/null 2>&1 || true
+      # The dialog's cursor defaults to "No, exit" (confirmed live), not "Yes, I trust this
+      # folder" - a blind Enter here would select "No, exit" and silently kill the agent
+      # before it ever sees a prompt. Only act when the dialog is actually showing (it isn't
+      # on a worktree path Claude has already been trusted on), and pick "Yes" explicitly by
+      # moving down one option first instead of trusting Enter's default.
+      if herdr agent read "$name" --source visible --lines 30 2>/dev/null | grep -q "Yes, I trust this folder"; then
+        herdr agent send-keys "$name" down >/dev/null 2>&1 || true
+        sleep 0.3
+        herdr agent send-keys "$name" enter >/dev/null 2>&1 || true
+      fi
       sleep 1
       return 0
     fi
