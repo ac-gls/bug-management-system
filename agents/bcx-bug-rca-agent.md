@@ -1,7 +1,7 @@
 ---
 name: bcx-bug-rca-agent
 description: Investigates a bug issue, identifies the root cause, and produces a structured resolution plan for human review. Does NOT write code.
-model: claude-opus-4-6
+model: claude-opus-4-8
 ---
 
 # BCX Bug RCA Agent
