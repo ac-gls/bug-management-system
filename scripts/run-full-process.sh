@@ -1,7 +1,8 @@
 #!/bin/bash
-# Main orchestration script. Runs a migration pass, then a fixing pass over whatever is
-# already labeled plan-approved (typically nothing yet, right after a fresh migration -
-# that label is added by a human after reviewing the RCA report on each issue).
+# Main entry point. This system is scoped to ADO -> GitHub issue creation only: query ADO for
+# tagged bugs, investigate each via bcx-bug-rca-agent, and create a tracking GitHub issue from
+# the resulting resolution plan (or comment back on ADO if the agent hit a blocker). It does
+# not implement fixes or open PRs - a human takes it from the tracking issue onward.
 #
 # Usage: ./run-full-process.sh [--limit N] [--live] [--branch <name>]
 # --branch applies to every bug processed in this invocation (default "main") - if bugs need
@@ -16,14 +17,5 @@ ARGS=()
 ARGS+=(--branch "$BASE_BRANCH")
 
 echo "Starting Bug Management System..."
-
-echo "Phase 1: Bug Migration"
 "$SCRIPT_DIR/start-bug-migration.sh" --limit "$LIMIT" "${ARGS[@]}"
-
-echo "Phase 2: Bug Fixing"
-"$SCRIPT_DIR/get-ready-issues.sh" --limit "$LIMIT"
-"$SCRIPT_DIR/start-bug-fixing.sh" "${ARGS[@]}"
-"$SCRIPT_DIR/new-pull-request.sh" "${ARGS[@]}"
-"$SCRIPT_DIR/verify-bug-fixes.sh"
-
 echo "Bug Management System process completed!"

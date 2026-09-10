@@ -344,15 +344,14 @@ Exactly one line, after the file is written. Do not repeat the report content in
 
 ## Step 4: What Happens After You Stop
 
-You do not create the GitHub issue and you do not hand off to `bcx-bug-coder-agent` yourself —
-the pipeline does both, in a separate process, from the report file you wrote. For context on
-what your report becomes:
+You do not create the GitHub issue yourself — the pipeline does, in a separate process, from
+the report file you wrote. Your job ends at the report. For context on what your report
+becomes:
 
 - **Normal case**: a tracking issue is created with title `Fix: [ADO bug title]` and body =
   your report file verbatim, plus an `ADO-#[id]` footer the pipeline appends. A human reviews
-  it and adds the `plan-approved` label once satisfied — that label is what later triggers
-  `bcx-bug-coder-agent` against your plan, in a fresh worktree and conversation you have no
-  part in.
+  it from there; what happens next (approval, assignment, implementation) is that team's
+  process, not something you drive or need to know about.
 - **Blocker case**: no issue is created. Your Blocker Resolution content is instead posted as
   a comment on the ADO ticket, and the ticket is tagged for follow-up.
 
@@ -374,5 +373,4 @@ ticket(s) for traceability, comma-separated with no spaces:
 ADO-#<ticket-id>[,ADO-#<ticket-id>,...]
 ```
 
-Then stop — still do not proceed to `bcx-bug-coder-agent` yourself; that remains a separate,
-human-gated step.
+Then stop.

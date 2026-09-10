@@ -1,6 +1,6 @@
 #!/bin/bash
-# Verifies the migration pass: GitHub issues created, ADO comments posted, investigation
-# worktrees present.
+# Verifies the migration pass: GitHub issues created, ADO comments posted, no leftover shared
+# investigation worktree.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
@@ -12,12 +12,16 @@ log "Verifying ADO -> GitHub mapping..."
 mapped_count=$(jq 'length' "$ADO_MAP_FILE")
 log "Bugs migrated (state/ado-to-github-map.json): $mapped_count"
 
-log "Verifying investigation worktrees..."
+log "Verifying shared investigation worktree was cleaned up..."
 if [ -d "$APP_WORKTREE_DIR" ]; then
-  worktree_count=$(find "$APP_WORKTREE_DIR" -maxdepth 1 -type d -name 'bug-*' | wc -l)
+  stale_worktrees=$(find "$APP_WORKTREE_DIR" -maxdepth 1 -type d -name 'rca-shared-*' | wc -l)
 else
-  worktree_count=0
+  stale_worktrees=0
 fi
-log "Investigation worktrees present: $worktree_count"
+if [ "$stale_worktrees" -gt 0 ]; then
+  log "WARNING: $stale_worktrees leftover shared investigation worktree(s) found - a prior run likely crashed before cleanup"
+else
+  log "No leftover shared investigation worktree found."
+fi
 
 log "Verification complete."

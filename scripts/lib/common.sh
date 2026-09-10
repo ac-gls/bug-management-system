@@ -18,10 +18,9 @@ LIMIT=1
 BASE_BRANCH="main"
 
 # Parses --live, --limit N, and --branch <name> from a script's "$@"; leaves remaining args
-# in REMAINING_ARGS. --branch overrides the default base ("main") that investigation/fix
-# worktrees are created from and that new-pull-request.sh opens PRs against - applies to
-# every bug processed in this invocation. Bugs needing different base branches must be run
-# in separate invocations grouped by branch.
+# in REMAINING_ARGS. --branch overrides the default base ("main") that the shared investigation
+# worktree is checked out from - applies to every bug processed in this invocation. Bugs
+# needing different base branches must be run in separate invocations grouped by branch.
 parse_common_args() {
   REMAINING_ARGS=()
   while [ $# -gt 0 ]; do
@@ -65,13 +64,13 @@ ensure_app_clone() {
   ensure_required_agents_installed
 }
 
-# bcx-reporting-platform is the source of truth for bcx-bug-rca-agent and bcx-bug-coder-agent
-# (this pipeline just orchestrates worktrees/panes and asks a claude agent to run them by
-# name) - both already exist there under .claude/agents/ and are committed to origin/main, so
-# this is normally a no-op. It's a defensive fallback for a checkout that predates them (an
-# older branch, a fork, APP_REPO_URL pointed elsewhere) using this repo's vendored copies in
-# agents/, so a missing agent fails loudly here instead of confusingly deep inside a herdr
-# pane. Never overwrites a file already present - a repo-side edit to the agent always wins.
+# bcx-reporting-platform is the source of truth for bcx-bug-rca-agent (this pipeline just
+# orchestrates worktrees/panes and asks a claude agent to run it by name) - it already exists
+# there under .claude/agents/ and is committed to origin/main, so this is normally a no-op.
+# It's a defensive fallback for a checkout that predates it (an older branch, a fork,
+# APP_REPO_URL pointed elsewhere) using this repo's vendored copy in agents/, so a missing
+# agent fails loudly here instead of confusingly deep inside a herdr pane. Never overwrites a
+# file already present - a repo-side edit to the agent always wins.
 ensure_required_agents_installed() {
   local dest_dir="$APP_REPO_DIR/.claude/agents" src name
   mkdir -p "$dest_dir"
