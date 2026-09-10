@@ -121,6 +121,38 @@ remove_worktree() {
   git -C "$APP_REPO_DIR" worktree remove --force "$path" 2>/dev/null || true
 }
 
+# Creates (or reuses) ONE shared, read-only worktree checked out directly on origin/<base> in
+# a detached HEAD - no new branch, since nothing is ever committed here. Used by
+# start-parallel-investigation.sh: bcx-bug-rca-agent never writes code (see
+# agents/bcx-bug-rca-agent.md), so every bug investigated in one run can safely read the same
+# checkout concurrently instead of each getting its own worktree. It exists only to isolate
+# this run's code snapshot from whatever else is happening in $APP_REPO_DIR (e.g. a concurrent
+# fixing pass) - the caller must remove_worktree it once every investigation in the run has
+# finished; it is not meant to persist between runs.
+# Args: <name> [base branch, default $BASE_BRANCH]
+ensure_shared_readonly_worktree() {
+  local name="$1" base="${2:-$BASE_BRANCH}"
+  local path="$APP_WORKTREE_DIR/$name"
+  if [ -d "$path" ]; then
+    # Leftover from an earlier crashed run - re-point it at the latest fetched commit rather
+    # than trusting whatever it happened to be checked out at.
+    git -C "$path" checkout --detach "origin/$base" >&2 || return 1
+    echo "$path"
+    return 0
+  fi
+  (
+    flock -x 200
+    if [ ! -d "$path" ]; then
+      git -C "$APP_REPO_DIR" worktree add --detach "$path" "origin/$base" >&2
+    fi
+  ) 200>"$WORKTREE_LOCK_FILE"
+  if [ ! -d "$path" ]; then
+    echo "ensure_shared_readonly_worktree: $path does not exist after git worktree add - see stderr above" >&2
+    return 1
+  fi
+  echo "$path"
+}
+
 ADO_MAP_FILE="$STATE_DIR/ado-to-github-map.json"
 [ -f "$ADO_MAP_FILE" ] || echo '{}' > "$ADO_MAP_FILE"
 

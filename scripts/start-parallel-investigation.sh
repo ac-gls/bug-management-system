@@ -1,9 +1,17 @@
 #!/bin/bash
-# For each bug in ado-bugs.json not already tracked (state/ado-to-github-map.json), opens a
-# dedicated git worktree + herdr pane, starts a real `claude` agent in it, and asks it to run
-# this repo's own bcx-bug-rca-agent directly against the ADO ticket - no GitHub issue exists
-# yet at this point. The agent explicitly stops after producing a resolution plan; it does
-# not implement anything.
+# For each bug in ado-bugs.json not already tracked (state/ado-to-github-map.json), starts a
+# real `claude` agent in its own herdr pane and asks it to run this repo's own
+# bcx-bug-rca-agent directly against the ADO ticket - no GitHub issue exists yet at this
+# point. The agent explicitly stops after producing a resolution plan; it never writes code
+# (see agents/bcx-bug-rca-agent.md) or commits anything.
+#
+# Because nothing is written back to the checkout, every bug investigated in this run shares
+# ONE read-only worktree (detached HEAD on origin/<base> - see ensure_shared_readonly_worktree
+# in scripts/lib/common.sh) instead of each getting its own. It exists only to isolate this
+# run's code snapshot from whatever else is happening in $APP_REPO_DIR (a concurrent fixing
+# pass, your own separate work in another app) - it is removed once every bug in this run has
+# finished investigating, not kept around between runs. Each bug still gets its own herdr
+# pane/agent process; they just all read the same directory.
 #
 # The ADO ticket's State is set to Active as soon as investigation starts (confirmed valid
 # transition: New -> Active via Microsoft.VSTS.Actions.StartWork).
@@ -29,14 +37,20 @@
 # Parallelism: herdr's `agent prompt` only reliably delivers the submitting Enter keystroke
 # when called with --wait (confirmed empirically - without it, the prompt text is typed into
 # the input box but never submitted, despite herdr's own docs claiming atomic submission
-# either way). So each bug's full pipeline (worktree -> pane -> agent -> prompt --wait ->
-# capture -> create tracking issue) runs as one backgrounded bash job; a final `wait` blocks
-# until all bugs have investigated concurrently.
+# either way). So each bug's full pipeline (pane -> agent -> prompt --wait -> capture -> create
+# tracking issue) runs as one backgrounded bash job; a final `wait` blocks until all bugs have
+# investigated concurrently, and only then is the shared worktree removed.
+#
+# Report files are named RESOLUTION-PLAN-<ado-id>.md, not a fixed name, since every bug writes
+# into the same shared directory - a fixed name would let concurrent bugs clobber each other's
+# report (this is also why the agent is told to skip its own Step 3.5 knowledge-saving here:
+# nothing written to this worktree persists past the run, and concurrent bugs writing the same
+# memory-bank files would race).
 #
 # Usage: ./start-parallel-investigation.sh [--live] [--branch <name>]
-# --branch (default "main") is the base the investigation worktree is created from - applies
-# to every bug in ado-bugs.json for this run.
-# Investigation itself always runs (it's non-destructive - a throwaway worktree + an agent
+# --branch (default "main") is the origin branch the shared investigation worktree is checked
+# out from - applies to every bug in ado-bugs.json for this run.
+# Investigation itself always runs (it's non-destructive - a read-only worktree + an agent
 # conversation). --live only gates whether the tracking issue + ADO comment-back actually get
 # created; without it, the resolution plan is printed for review instead.
 
@@ -57,22 +71,23 @@ if [ "$count" -eq 0 ]; then
   exit 0
 fi
 
-log "Investigating $count bug(s)..."
+safe_base="${BASE_BRANCH//\//-}"
+shared_worktree_path=$(ensure_shared_readonly_worktree "rca-shared-$safe_base")
+if [ -z "$shared_worktree_path" ]; then
+  log "Failed to create shared investigation worktree, aborting"
+  exit 1
+fi
+
+log "Investigating $count bug(s) against shared worktree $shared_worktree_path (origin/$BASE_BRANCH)..."
 
 # Runs the full pipeline for one bug. Meant to be invoked as a backgrounded job so multiple
-# bugs investigate concurrently.
+# bugs investigate concurrently. Reads from the shared worktree passed in - never creates or
+# removes a worktree of its own.
 investigate_one() {
-  local ado_id="$1" title="$2" ado_url="$3"
+  local ado_id="$1" title="$2" ado_url="$3" worktree_path="$4"
   local name="rca-$ado_id"
-  local branch="investigation/$ado_id"
 
   set_ado_active "$ado_id"
-  local worktree_path
-  worktree_path=$(ensure_worktree "bug-$ado_id" "$branch")
-  if [ -z "$worktree_path" ]; then
-    log "[$ado_id] Failed to create worktree, skipping"
-    return 1
-  fi
 
   local ws pane
   read -r ws pane <<< "$(herdr_open_pane "$worktree_path" "$name")"
@@ -87,8 +102,13 @@ investigate_one() {
     return 1
   fi
 
-  local report_filename="RESOLUTION-PLAN.md"
-  local prompt="Use the bcx-bug-rca-agent to investigate ADO ticket $ado_id (organization $ADO_ORG, project \"$ADO_PROJECT\") in $GITHUB_ORG/$GITHUB_REPO. There is no GitHub issue for this bug yet. Produce your resolution plan and stop - do not create a tracking issue and do not proceed to implementation; the tracking issue will be created from your report separately. Write the complete report as clean, well-formatted Markdown to a file named $report_filename in the current directory - proper headings, code fences for file paths/snippets, no terminal chrome or box-drawing characters, nothing that isn't meant to appear as the body of a GitHub issue. Start the file with a single top-level heading. When the file is written, reply in chat with just a one-line confirmation - do not repeat the report content in chat. If your own Step 0 Bug Clarity Check fails and you cannot proceed, write that same $report_filename file starting with the exact line 'BLOCKER FOUND' (all caps, nothing before it) followed by the Type/Issue/Detail/Recommendation from your blocker report - do not fabricate a resolution plan when the check fails."
+  local report_filename="RESOLUTION-PLAN-$ado_id.md"
+  # Clear any stale file from a previous crashed run before prompting - the shared worktree
+  # can be reused across runs, and a leftover file must never be mistaken for this run's
+  # output.
+  rm -f "$worktree_path/$report_filename"
+
+  local prompt="Use the bcx-bug-rca-agent to investigate ADO ticket $ado_id (organization $ADO_ORG, project \"$ADO_PROJECT\") in $GITHUB_ORG/$GITHUB_REPO. There is no GitHub issue for this bug yet. Produce your resolution plan and stop - do not create a tracking issue and do not proceed to implementation; the tracking issue will be created from your report separately. This worktree is shared read-only across every bug investigated in this run and will be deleted once they all finish - do not modify, create, or commit any file except $report_filename, and skip your own Step 3.5 (Banyan Memory Bank knowledge saving) entirely since nothing written here persists. Write the complete report as clean, well-formatted Markdown to a file named $report_filename in the current directory - proper headings, code fences for file paths/snippets, no terminal chrome or box-drawing characters, nothing that isn't meant to appear as the body of a GitHub issue. Start the file with a single top-level heading. When the file is written, reply in chat with just a one-line confirmation - do not repeat the report content in chat. If your own Step 0 Bug Clarity Check fails and you cannot proceed, write that same $report_filename file starting with the exact line 'BLOCKER FOUND' (all caps, nothing before it) followed by the Type/Issue/Detail/Recommendation from your blocker report - do not fabricate a resolution plan when the check fails."
 
   log "[$ado_id] Prompting agent $name..."
   if ! herdr_prompt_and_wait "$name" "$prompt" "$HERDR_AGENT_TIMEOUT_MS"; then
@@ -109,6 +129,7 @@ investigate_one() {
     return 1
   fi
   cp "$worktree_path/$report_filename" "$report_file"
+  rm -f "$worktree_path/$report_filename"
 
   # A real resolution plan or BLOCKER FOUND report is always substantial (headings, several
   # paragraphs); a near-empty file is just as suspicious as a missing one.
@@ -141,7 +162,7 @@ jq -c '.[]' ado-bugs.json | while read -r bug; do
 done > "$TEMP_DIR/investigation-targets.tsv"
 
 while IFS=$'\t' read -r ado_id title url; do
-  investigate_one "$ado_id" "$title" "$url" &
+  investigate_one "$ado_id" "$title" "$url" "$shared_worktree_path" &
   pids+=($!)
 done < "$TEMP_DIR/investigation-targets.tsv"
 
@@ -150,4 +171,5 @@ for pid in "${pids[@]}"; do
   wait "$pid" || failures=$((failures + 1))
 done
 
-log "Investigation pass complete ($failures failure(s))."
+log "Investigation pass complete ($failures failure(s)) - removing shared worktree $shared_worktree_path"
+remove_worktree "$shared_worktree_path"

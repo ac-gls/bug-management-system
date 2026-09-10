@@ -11,11 +11,16 @@ independently verifying fixes before opening a PR.
 
 ## How it fits together
 
-1. **Migration** (`start-bug-migration.sh`): finds ADO bugs tagged `MigrateToGitHub`, then opens
-   one worktree + one live `claude` agent per bug and asks it to run `bcx-bug-rca-agent`
-   directly against the ADO ticket - no GitHub issue exists yet. The agent stops after
-   producing a resolution plan; it never writes code. Exactly one of two things happens as the
-   deterministic final step:
+1. **Migration** (`start-bug-migration.sh`): finds ADO bugs tagged `MigrateToGitHub`, checks out
+   one shared, read-only worktree for the whole run (detached HEAD on `origin/<branch>` - the
+   RCA agent never writes code, so every bug in the run can safely read the same checkout
+   concurrently instead of each getting its own), then opens one live `claude` agent per bug
+   against it and asks it to run `bcx-bug-rca-agent` directly against the ADO ticket - no
+   GitHub issue exists yet. The agent stops after producing a resolution plan; it never writes
+   code. The shared worktree is removed once every bug in the run has finished investigating -
+   it only exists to isolate this run's code snapshot from whatever else is happening in the
+   app repo (a concurrent fixing pass, your own separate work in another app). Exactly one of
+   two things happens as the deterministic final step:
    - A real plan was produced -> the **tracking GitHub issue is created from that report**
      (title `Fix: <bug title>`, body = the resolution plan itself, matching
      `bcx-bug-rca-agent`'s own Step 4 convention) rather than pre-creating a plain issue that
@@ -39,9 +44,11 @@ independently verifying fixes before opening a PR.
 Everything defaults to a **dry run** (`--limit 1`, no `--live`) so you can review exactly what
 would be created before anything touches real ADO tickets or GitHub issues/PRs.
 
-Investigation/fix worktrees branch off `main` by default - pass `--branch <name>` to target a
-different base for bugs that live on a different branch. It applies to every bug processed in
-that invocation, isn't persisted anywhere, and must be passed consistently to every script
+Investigation's shared worktree and fix worktrees are both based on `main` by default - pass
+`--branch <name>` to target a different base for bugs that live on a different branch (the
+investigation worktree is a detached checkout of that branch; each fix worktree still branches
+off it per issue, since that one actually gets committed to and becomes a PR). It applies to
+every bug processed in that invocation, isn't persisted anywhere, and must be passed consistently to every script
 call for the same batch of bugs (migration scripts, then later the fixing-phase scripts for
 the same issues) - a mismatch silently opens the PR against the wrong base.
 

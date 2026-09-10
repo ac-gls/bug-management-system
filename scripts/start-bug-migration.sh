@@ -1,11 +1,11 @@
 #!/bin/bash
 # Orchestrates the full migration pass: query ADO for tagged bugs -> parallel investigation
-# via bcx-bug-rca-agent, one worktree+agent per bug, each creating its own tracking GitHub
-# issue from the resulting resolution plan.
+# via bcx-bug-rca-agent (one shared read-only worktree for the whole run, one agent per bug),
+# each creating its own tracking GitHub issue from the resulting resolution plan.
 #
 # Usage: ./start-bug-migration.sh [--limit N] [--live] [--branch <name>]
 # Defaults to --limit 1, dry-run (no --live), and base branch "main". Investigation itself
-# always runs (it's non-destructive - a throwaway git worktree + an agent conversation);
+# always runs (it's non-destructive - a read-only worktree + an agent conversation);
 # --live only gates whether the tracking issue and ADO comment-back actually get created.
 # --branch applies to every bug processed in this invocation - if bugs need different base
 # branches, run separately per branch/group of bugs.
