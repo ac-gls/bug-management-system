@@ -36,6 +36,11 @@ is your team's own process.
 - For each bug, opens a dedicated Herdr pane and starts a real `claude` agent in it, prompting
   it to run `bcx-bug-rca-agent` against that ADO ticket. Sets the ADO ticket to `Active` as soon
   as investigation starts.
+- Herdr's own `agent start` success signal isn't trusted at face value: under load it can report
+  success while the pane is still sitting at a bare shell prompt with `claude` typed but never
+  submitted (`herdr_start_claude` in `scripts/lib/herdr.sh`). The real `Claude Code v...` banner
+  is required before the pipeline moves on to prompting the agent, with a bare-Enter recovery if
+  it hasn't rendered yet - see `troubleshooting.md`.
 - Each agent writes its findings to a uniquely-named file (`RESOLUTION-PLAN-<ado-id>.md`, not a
   fixed name, since bugs share a directory) and replies in chat with a one-line confirmation
   only - the pipeline never trusts raw chat output as the source of truth.

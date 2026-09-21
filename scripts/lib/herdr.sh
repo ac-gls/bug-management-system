@@ -4,6 +4,10 @@
 #   herdr workspace create --cwd <path> --label <text>
 #     -> JSON: .result.workspace.workspace_id, .result.root_pane.pane_id
 #   herdr agent start <name> --kind claude --pane <pane_id> --timeout <ms>
+#     -> despite docs claiming success means "the expected agent was detected... and is ready
+#     for input", confirmed live under load that it can report success while the pane is
+#     actually still sitting at a bare shell prompt with "claude" typed but never submitted -
+#     verify the real Claude Code banner before trusting this (see herdr_start_claude).
 #   herdr agent send-keys <name> <down|enter>  (dismisses the one-time "trust this folder?"
 #     dialog that appears the first time Claude Code opens a brand-new worktree directory -
 #     its default-highlighted option is "No, exit", not the trust option, so this must move
@@ -68,7 +72,28 @@ herdr_start_claude() {
         herdr agent send-keys "$name" enter >/dev/null 2>&1 || true
       fi
       sleep 1
-      return 0
+
+      # `agent start`'s own exit code is not proof the CLI actually launched: confirmed live
+      # (every one of 9 investigations in one run) that under load it reports success while
+      # the pane is still sitting at a bare shell prompt with "claude" typed but never
+      # submitted - the same submitting-Enter starvation herdr_prompt_and_wait already works
+      # around, just hitting the launch keystroke instead of the prompt one. Trusting that
+      # exit code sent every subsequent prompt into a plain shell, which of course could never
+      # "start working". Require the actual Claude Code banner before declaring success, and
+      # recover with a bare Enter (same recipe as herdr_prompt_and_wait) if it hasn't rendered
+      # yet - it's a shared, well-tested fallback, harmless to send again if Claude is already
+      # up (an extra Enter on an empty composer is a no-op).
+      local ready_attempt
+      for ready_attempt in 1 2 3 4 5; do
+        if herdr agent read "$name" --source recent-unwrapped --lines 30 2>/dev/null | grep -q "Claude Code v"; then
+          return 0
+        fi
+        herdr agent send-keys "$name" enter >/dev/null 2>&1 || true
+        sleep 2
+      done
+      echo "herdr_start_claude: agent '$name' reported started but never showed the Claude Code banner; recent output:" >&2
+      herdr agent read "$name" --source recent-unwrapped --lines 30 >&2
+      return 1
     fi
     if echo "$out" | grep -q "agent_pane_busy"; then
       sleep 2

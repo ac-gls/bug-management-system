@@ -22,6 +22,13 @@ terminal:
 - **Agent did not settle in time** - the agent never finished within `HERDR_AGENT_TIMEOUT_MS`
   (default 30 min, `configs/system.conf`). Attach with `herdr session attach default` and check
   the pane directly.
+  - If the pane shows a bare shell prompt with `claude` typed but never actually run, that's
+    Herdr's `agent start` reporting success before the launching Enter really registered
+    (confirmed live under load - every bug in one run hit this identically).
+    `herdr_start_claude` (`scripts/lib/herdr.sh`) now waits for the real `Claude Code v...`
+    banner and retries with a bare Enter before declaring the agent started; if you still see
+    this, the pane may need more retries than the current cap (5) or the machine is more
+    starved than before - reduce `MAX_PARALLEL_INVESTIGATIONS` further.
 - **Agent settled but never wrote `RESOLUTION-PLAN-<ado-id>.md`** - the pipeline will not create
   a tracking issue from unverified content. Check `temp/rca-<ado-id>-raw-capture.log` for the
   agent's raw output.
