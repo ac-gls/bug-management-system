@@ -13,7 +13,10 @@
 #     its default-highlighted option is "No, exit", not the trust option, so this must move
 #     down before confirming rather than just pressing enter)
 #   herdr agent prompt <name> "<text>" --wait --timeout <ms>
-#   herdr agent read <name> --source recent-unwrapped --lines <n>
+#   herdr agent read <name> --source recent-unwrapped|visible --lines <n>
+#     -> recent/recent-unwrapped read scrollback, which is always empty while Claude Code runs
+#     its fullscreen (alternate-screen) renderer - confirmed live on v2.1.280. Only `visible`
+#     sees that screen. Use herdr_read below rather than calling this directly.
 #   herdr workspace close <workspace_id>
 #
 # Requires jq.
@@ -42,6 +45,18 @@ herdr_open_pane() {
     return 1
   fi
   echo "$ws $pane"
+}
+
+# Prints an agent's terminal output: scrollback when there is any (classic renderer), else the
+# visible screen (fullscreen renderer, where scrollback is always empty - see header).
+# Args: <agent-name> <lines>
+herdr_read() {
+  local name="$1" lines="$2" out
+  out=$(herdr agent read "$name" --source recent-unwrapped --lines "$lines" 2>/dev/null)
+  if ! printf '%s' "$out" | grep -q '[^[:space:]]'; then
+    out=$(herdr agent read "$name" --source visible --lines "$lines" 2>/dev/null)
+  fi
+  printf '%s\n' "$out"
 }
 
 herdr_close_workspace() {
@@ -83,16 +98,21 @@ herdr_start_claude() {
       # recover with a bare Enter (same recipe as herdr_prompt_and_wait) if it hasn't rendered
       # yet - it's a shared, well-tested fallback, harmless to send again if Claude is already
       # up (an extra Enter on an empty composer is a no-op).
+      # The banner alone isn't enough: on a tall pane the composer is padded with blank lines
+      # and the banner scrolls out of the 30-line window (confirmed live - Claude was up and
+      # idle but the check failed). The composer's footer markers never appear in a bare
+      # shell, so any of them is equally good proof the CLI is running.
       local ready_attempt
       for ready_attempt in 1 2 3 4 5; do
-        if herdr agent read "$name" --source recent-unwrapped --lines 30 2>/dev/null | grep -q "Claude Code v"; then
+        if herdr_read "$name" 40 \
+            | grep -qE "Claude Code v|shift\+tab to cycle|/effort"; then
           return 0
         fi
         herdr agent send-keys "$name" enter >/dev/null 2>&1 || true
         sleep 2
       done
       echo "herdr_start_claude: agent '$name' reported started but never showed the Claude Code banner; recent output:" >&2
-      herdr agent read "$name" --source recent-unwrapped --lines 30 >&2
+      herdr_read "$name" 40 >&2
       return 1
     fi
     if echo "$out" | grep -q "agent_pane_busy"; then
@@ -139,13 +159,13 @@ herdr_prompt_and_wait() {
 
   if [ "$started" != true ]; then
     echo "herdr_prompt_and_wait: agent '$name' never started working after ${attempt} attempt(s); recent output:" >&2
-    herdr agent read "$name" --source recent-unwrapped --lines 300 >&2
+    herdr_read "$name" 300 >&2
     return 1
   fi
 
   if ! herdr agent wait "$name" --timeout "$timeout" >/dev/null 2>&1; then
     echo "herdr_prompt_and_wait: agent '$name' did not settle within ${timeout}ms after starting work; recent output:" >&2
-    herdr agent read "$name" --source recent-unwrapped --lines 300 >&2
+    herdr_read "$name" 300 >&2
     return 1
   fi
 }
@@ -153,5 +173,5 @@ herdr_prompt_and_wait() {
 # Prints the agent's recent terminal output (used to capture a final report).
 herdr_capture() {
   local name="$1" lines="${2:-500}"
-  herdr agent read "$name" --source recent-unwrapped --lines "$lines"
+  herdr_read "$name" "$lines"
 }
