@@ -13,8 +13,8 @@
 # finished investigating, not kept around between runs. Each bug still gets its own herdr
 # pane/agent process; they just all read the same directory.
 #
-# The ADO ticket's State is set to Active as soon as investigation starts (confirmed valid
-# transition: New -> Active via Microsoft.VSTS.Actions.StartWork).
+# The ADO ticket's State is already Active by this point - get-ado-bugs.sh sets it when the
+# bug is collected.
 #
 # Exactly one of two things happens as the deterministic final step, never both and never
 # neither:
@@ -99,7 +99,6 @@ investigate_one() {
   local ado_id="$1" title="$2" ado_url="$3" worktree_path="$4"
   local name="rca-$ado_id"
 
-  set_ado_active "$ado_id"
   set_bug_status "$ado_id" starting "opening pane"
 
   local ws pane

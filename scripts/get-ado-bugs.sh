@@ -1,14 +1,19 @@
 #!/bin/bash
-# Queries Azure DevOps for open Bug work items tagged $MIGRATION_TAG, excludes bugs already
+# Queries Azure DevOps for New-state Bug work items tagged $MIGRATION_TAG, excludes bugs already
 # migrated (tracked in state/ado-to-github-map.json), and writes the result to ado-bugs.json
-# in the current directory.
+# in the current directory. Each collected bug's ADO State is set to Active (New -> Active),
+# which also drops it out of this query on future runs. Dry-run unless --live is passed.
 #
-# Usage: ./get-ado-bugs.sh [--limit N]
+# Usage: ./get-ado-bugs.sh [--limit N] [--live]
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 parse_common_args "$@"
 
-WIQL="SELECT [System.Id],[System.Title],[System.Description],[System.Tags],[System.State] FROM WorkItems WHERE [System.WorkItemType]='Bug' AND [System.Tags] CONTAINS '$MIGRATION_TAG' AND [System.State] NOT IN ('Closed','Resolved','Done')"
+WIQL="SELECT [System.Id],[System.Title],[System.Description],[System.Tags],[System.State] FROM WorkItems WHERE [System.WorkItemType]='Bug' AND [System.Tags] CONTAINS '$MIGRATION_TAG' AND [System.State] = 'New'"
+
+# Never leave a previous run's results behind - if anything below fails, there must be no
+# ado-bugs.json for start-parallel-investigation.sh to pick up.
+rm -f ado-bugs.json
 
 log "Querying ADO ($ADO_ORG / $ADO_PROJECT) for bugs tagged '$MIGRATION_TAG'..."
 
@@ -44,7 +49,12 @@ for id in $ids; do
     continue
   fi
 
-  item=$(az boards work-item show --id "$id" --organization "$ADO_ORG" -o json)
+  if ! item=$(az boards work-item show --id "$id" --organization "$ADO_ORG" -o json); then
+    # Skip rather than abort: bugs already collected this run have been set Active and must
+    # still reach ado-bugs.json. This one is left New, so the next run picks it up.
+    log "Bug $id: failed to fetch work item - skipping (left in New for a future run)"
+    continue
+  fi
   # This org's Bug work items don't populate System.Description - the real content lives in
   # Microsoft.VSTS.TCM.ReproSteps plus custom fields. _links.html.href isn't present on this
   # API response shape either, so the human-facing URL is constructed directly.
@@ -62,6 +72,7 @@ for id in $ids; do
   }')
   bugs_json=$(echo "$bugs_json" | jq --argjson e "$entry" '. + [$e]')
   count=$((count + 1))
+  set_ado_active "$id" || log "Bug $id: failed to set ADO state to Active (continuing)"
   if [ "$count" -ge "$LIMIT" ]; then
     break
   fi

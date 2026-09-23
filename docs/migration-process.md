@@ -13,15 +13,23 @@ never writes application code, never opens a branch that gets merged, and never 
 request. What happens after the tracking issue exists (approval, assignment, implementation)
 is your team's own process.
 
+## Pre-flight: Connection check (`check_connections` in `scripts/lib/common.sh`)
+
+- Before Phase 1, `start-bug-migration.sh` confirms both Azure DevOps (`az devops project show`)
+  and GitHub (`gh repo view`) are reachable and authenticated, and stops if either fails.
+- If Phase 1 itself fails, the run stops there too. `get-ado-bugs.sh` deletes any previous
+  `ado-bugs.json` up front, so a failed query can never leave stale bugs for Phase 2.
+
 ## Phase 1: Query ADO (`get-ado-bugs.sh`)
 
-- Runs a WIQL query against `$ADO_ORG`/`$ADO_PROJECT` for open Bug work items tagged
+- Runs a WIQL query against `$ADO_ORG`/`$ADO_PROJECT` for Bug work items in the `New` state tagged
   `$MIGRATION_TAG` (default `MigrateToGitHub`).
 - Skips bugs already recorded in `state/ado-to-github-map.json` (already migrated, or
   previously `BLOCKED` pending more information).
 - For each remaining bug (up to `--limit N`), fetches the full work item and writes a
   structured entry (title, description/repro steps, expected/actual results, tenant, priority,
-  tags, state, ADO URL) to `ado-bugs.json`.
+  tags, state, ADO URL) to `ado-bugs.json`, and sets that ADO ticket's State to `Active`
+  (`--live` only).
 
 ## Phase 2: Parallel Investigation (`start-parallel-investigation.sh`)
 
@@ -34,8 +42,7 @@ is your team's own process.
   worktree. It exists purely to isolate this run's code snapshot from whatever else is
   happening in the app repo, and is deleted once every bug in the run has finished.
 - For each bug, opens a dedicated Herdr pane and starts a real `claude` agent in it, prompting
-  it to run `bcx-bug-rca-agent` against that ADO ticket. Sets the ADO ticket to `Active` as soon
-  as investigation starts.
+  it to run `bcx-bug-rca-agent` against that ADO ticket.
 - Herdr's own `agent start` success signal isn't trusted at face value: under load it can report
   success while the pane is still sitting at a bare shell prompt with `claude` typed but never
   submitted (`herdr_start_claude` in `scripts/lib/herdr.sh`). The real `Claude Code v...` banner

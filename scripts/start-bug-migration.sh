@@ -6,7 +6,8 @@
 # Usage: ./start-bug-migration.sh [--limit N] [--live] [--branch <name>]
 # Defaults to --limit 1, dry-run (no --live), and base branch "main". Investigation itself
 # always runs (it's non-destructive - a read-only worktree + an agent conversation);
-# --live only gates whether the tracking issue and ADO comment-back actually get created.
+# --live gates every ADO/GitHub write: setting collected bugs to Active, and creating the
+# tracking issue and ADO comment-back.
 # --branch applies to every bug processed in this invocation - if bugs need different base
 # branches, run separately per branch/group of bugs.
 
@@ -18,8 +19,16 @@ ARGS=()
 [ "$LIVE" = true ] && ARGS+=(--live)
 ARGS+=(--branch "$BASE_BRANCH")
 
+log "=== Pre-flight: Checking ADO and GitHub connections ==="
+check_connections || exit 1
+
 log "=== Phase 1: Querying ADO for tagged bugs ==="
-"$SCRIPT_DIR/get-ado-bugs.sh" --limit "$LIMIT"
+GET_ARGS=(--limit "$LIMIT")
+[ "$LIVE" = true ] && GET_ARGS+=(--live)
+if ! "$SCRIPT_DIR/get-ado-bugs.sh" "${GET_ARGS[@]}"; then
+  log "Phase 1 failed - stopping before investigation so a stale ado-bugs.json isn't processed."
+  exit 1
+fi
 
 log "=== Phase 2: Parallel investigation (bcx-bug-rca-agent) ==="
 "$SCRIPT_DIR/start-parallel-investigation.sh" "${ARGS[@]}"

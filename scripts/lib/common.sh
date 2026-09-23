@@ -43,6 +43,31 @@ dry_run_note() {
   return 1
 }
 
+# Verifies ADO and GitHub are both reachable and authenticated before anything else runs.
+# Without this, an expired login or network blip made get-ado-bugs.sh fail its query while
+# the rest of the pipeline carried on against a stale ado-bugs.json from an earlier run -
+# investigating (and marking Active) bugs that no longer matched the search criteria.
+check_connections() {
+  local ok=true out
+  log "Checking Azure DevOps connection ($ADO_ORG / $ADO_PROJECT)..."
+  if ! out=$(az devops project show --project "$ADO_PROJECT" --organization "$ADO_ORG" -o none 2>&1); then
+    log "Azure DevOps connection check failed:"
+    echo "$out" >&2
+    ok=false
+  fi
+  log "Checking GitHub connection ($GITHUB_ORG/$GITHUB_REPO)..."
+  if ! out=$(gh repo view "$GITHUB_ORG/$GITHUB_REPO" --json name 2>&1); then
+    log "GitHub connection check failed:"
+    echo "$out" >&2
+    ok=false
+  fi
+  if [ "$ok" != true ]; then
+    log "Connection check failed - run scripts/authenticate.sh (or fix connectivity) and retry."
+    return 1
+  fi
+  log "Connections OK."
+}
+
 # Clones APP_REPO_DIR if missing, otherwise fetches latest.
 ensure_app_clone() {
   # Without this, a plain `git clone` over https hangs indefinitely (no error, no prompt) on
@@ -165,7 +190,7 @@ ado_map_set() {
   jq --arg id "$id" --arg issue "$issue" '.[$id] = $issue' "$ADO_MAP_FILE" > "$tmp" && mv "$tmp" "$ADO_MAP_FILE"
 }
 
-# Marks the ADO ticket Active at the start of investigation (confirmed valid transition for
+# Marks the ADO ticket Active when get-ado-bugs.sh collects it (confirmed valid transition for
 # this project's Bug workflow: New -> Active via Microsoft.VSTS.Actions.StartWork).
 set_ado_active() {
   local ado_id="$1"
