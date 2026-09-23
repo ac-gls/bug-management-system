@@ -73,7 +73,7 @@ herdr_close_workspace() {
 herdr_start_claude() {
   local name="$1" pane="$2" attempt out
   for attempt in 1 2 3 4 5; do
-    out=$(herdr agent start "$name" --kind "$HERDR_AGENT_KIND" --pane "$pane" --timeout 45000 2>&1)
+    out=$(herdr agent start "$name" --kind "$HERDR_AGENT_KIND" --pane "$pane" --timeout "$HERDR_AGENT_START_TIMEOUT_MS" 2>&1)
     if [ $? -eq 0 ]; then
       sleep 1
       # The dialog's cursor defaults to "No, exit" (confirmed live), not "Yes, I trust this
@@ -144,7 +144,7 @@ herdr_start_claude() {
 # Phase 2 (only reached once "working" has actually been observed) waits for real completion.
 herdr_prompt_and_wait() {
   local name="$1" prompt="$2" timeout="${3:-$HERDR_AGENT_TIMEOUT_MS}"
-  local confirm_timeout=15000
+  local confirm_timeout="$HERDR_PROMPT_CONFIRM_TIMEOUT_MS"
   local attempt started=false
 
   for attempt in 1 2 3; do

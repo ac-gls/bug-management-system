@@ -5,7 +5,7 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 log "Verifying GitHub issues..."
-issue_count=$(gh issue list --repo "$GITHUB_ORG/$GITHUB_REPO" --label bug --state open --json number | jq 'length')
+issue_count=$(gh issue list --repo "$GITHUB_ORG/$GITHUB_REPO" --label "$GITHUB_ISSUE_LABEL" --state open --json number | jq 'length')
 log "Open bug issues in $GITHUB_ORG/$GITHUB_REPO: $issue_count"
 
 log "Verifying ADO -> GitHub mapping..."

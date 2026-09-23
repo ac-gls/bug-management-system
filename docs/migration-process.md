@@ -18,7 +18,7 @@ is your team's own process.
 - Before Phase 1, `start-bug-migration.sh` confirms both Azure DevOps (`az devops project show`)
   and GitHub (`gh repo view`) are reachable and authenticated, and stops if either fails.
 - If Phase 1 itself fails, the run stops there too. `get-ado-bugs.sh` deletes any previous
-  `ado-bugs.json` up front, so a failed query can never leave stale bugs for Phase 2.
+  `temp/ado-bugs.json` (`ADO_BUGS_FILE`) up front, so a failed query can never leave stale bugs for Phase 2.
 
 ## Phase 1: Query ADO (`get-ado-bugs.sh`)
 
@@ -28,7 +28,7 @@ is your team's own process.
   previously `BLOCKED` pending more information).
 - For each remaining bug (up to `--limit N`), fetches the full work item and writes a
   structured entry (title, description/repro steps, expected/actual results, tenant, priority,
-  tags, state, ADO URL) to `ado-bugs.json`, and sets that ADO ticket's State to `Active`
+  tags, state, ADO URL) to `temp/ado-bugs.json`, and sets that ADO ticket's State to `Active`
   (`--live` only).
 
 ## Phase 2: Parallel Investigation (`start-parallel-investigation.sh`)

@@ -1,5 +1,6 @@
 # Configuration files with credentials
 configs/credentials.conf
+configs/system.local.conf
 
 # Log files
 logs/

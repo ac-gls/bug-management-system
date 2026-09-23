@@ -1,0 +1,8 @@
+# Per-machine overrides for configs/system.conf. Copy to configs/system.local.conf (gitignored)
+# and uncomment only what you need to change. This file is sourced after system.conf, so
+# values derived there (e.g. APP_REPO_URL from GITHUB_ORG/GITHUB_REPO) must be re-set here too
+# if you change what they're built from.
+
+# APP_REPO_DIR="$HOME/code/bcx-app"
+# APP_WORKTREE_DIR="$HOME/code/bcx-app-worktrees"
+# MAX_PARALLEL_INVESTIGATIONS=2

@@ -9,16 +9,17 @@ SCRIPTS_DIR_SELF="$(cd "$LIB_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$SCRIPTS_DIR_SELF/.." && pwd)"
 
 source "$REPO_ROOT/configs/system.conf"
-source "$REPO_ROOT/configs/credentials.conf"
+# Optional - only needed when tokens are used instead of interactive gh/az logins.
+if [ -f "$REPO_ROOT/configs/credentials.conf" ]; then source "$REPO_ROOT/configs/credentials.conf"; fi
 
 mkdir -p "$LOG_DIR" "$TEMP_DIR" "$STATE_DIR"
 
 LIVE=false
-LIMIT=1
-BASE_BRANCH="main"
+LIMIT="$DEFAULT_LIMIT"
+BASE_BRANCH="$DEFAULT_BASE_BRANCH"
 
 # Parses --live, --limit N, and --branch <name> from a script's "$@"; leaves remaining args
-# in REMAINING_ARGS. --branch overrides the default base ("main") that the shared investigation
+# in REMAINING_ARGS. --branch overrides the default base ($DEFAULT_BASE_BRANCH) that the shared investigation
 # worktree is checked out from - applies to every bug processed in this invocation. Bugs
 # needing different base branches must be run in separate invocations grouped by branch.
 parse_common_args() {
@@ -45,7 +46,7 @@ dry_run_note() {
 
 # Verifies ADO and GitHub are both reachable and authenticated before anything else runs.
 # Without this, an expired login or network blip made get-ado-bugs.sh fail its query while
-# the rest of the pipeline carried on against a stale ado-bugs.json from an earlier run -
+# the rest of the pipeline carried on against a stale $ADO_BUGS_FILE from an earlier run -
 # investigating (and marking Active) bugs that no longer matched the search criteria.
 check_connections() {
   local ok=true out
@@ -89,7 +90,7 @@ ensure_app_clone() {
   ensure_required_agents_installed
 }
 
-# bcx-reporting-platform is the source of truth for bcx-bug-rca-agent (this pipeline just
+# The app repo is the source of truth for $RCA_AGENT_NAME (this pipeline just
 # orchestrates worktrees/panes and asks a claude agent to run it by name) - it already exists
 # there under .claude/agents/ and is committed to origin/main, so this is normally a no-op.
 # It's a defensive fallback for a checkout that predates it (an older branch, a fork,
@@ -108,7 +109,7 @@ ensure_required_agents_installed() {
   done
 }
 
-# Creates (or reuses) a git worktree for a bug/issue off origin/main.
+# Creates (or reuses) a git worktree for a bug/issue off origin/<base>.
 # Args: <worktree-name> <branch-name>
 # `git worktree add` mutates shared metadata under $APP_REPO_DIR/.git/worktrees - running it
 # concurrently for multiple bugs (the whole point of this pipeline) corrupts that metadata:
@@ -190,15 +191,15 @@ ado_map_set() {
   jq --arg id "$id" --arg issue "$issue" '.[$id] = $issue' "$ADO_MAP_FILE" > "$tmp" && mv "$tmp" "$ADO_MAP_FILE"
 }
 
-# Marks the ADO ticket Active when get-ado-bugs.sh collects it (confirmed valid transition for
-# this project's Bug workflow: New -> Active via Microsoft.VSTS.Actions.StartWork).
+# Marks the ADO ticket $ADO_ACTIVE_STATE when get-ado-bugs.sh collects it (confirmed valid
+# transition for this project's Bug workflow: New -> Active via Microsoft.VSTS.Actions.StartWork).
 set_ado_active() {
   local ado_id="$1"
   if [ "$LIVE" != true ]; then
-    log "DRY RUN (pass --live to actually do this): az boards work-item update --id $ado_id --state Active"
+    log "DRY RUN (pass --live to actually do this): az boards work-item update --id $ado_id --state $ADO_ACTIVE_STATE"
     return 0
   fi
-  az boards work-item update --id "$ado_id" --organization "$ADO_ORG" --state "Active" >/dev/null
+  az boards work-item update --id "$ado_id" --organization "$ADO_ORG" --state "$ADO_ACTIVE_STATE" >/dev/null
 }
 
 # Swaps $MIGRATION_TAG for <new_tag> on the ADO ticket, preserving every other tag untouched.
@@ -228,7 +229,7 @@ replace_ado_migration_tag() {
 
 # Posts a comment on the ADO ticket saying more information is required, using the
 # BLOCKER FOUND content bcx-bug-rca-agent wrote instead of a resolution plan. No GitHub issue
-# is created for this bug. Swaps its ADO tag from $MIGRATION_TAG to RequiresAdditionalInformation
+# is created for this bug. Swaps its ADO tag from $MIGRATION_TAG to $BLOCKED_TAG
 # (so it naturally drops out of future WIQL queries filtered on $MIGRATION_TAG) and also marks
 # it "BLOCKED" in state/ado-to-github-map.json as a redundant safety net in case the tag write
 # itself fails. Clear both the tag and the state entry once the ticket has enough information
@@ -252,20 +253,20 @@ post_ado_blocker_comment() {
 
 $blocker_detail" >/dev/null
 
-  replace_ado_migration_tag "$ado_id" "RequiresAdditionalInformation"
+  replace_ado_migration_tag "$ado_id" "$BLOCKED_TAG"
   ado_map_set "$ado_id" "BLOCKED"
 }
 
 # Creates the GitHub tracking issue FROM a completed RCA report (its body IS the resolution
 # plan, not a copy of the ADO ticket) - matches bcx-bug-rca-agent's own Step 4 convention
-# (title "Fix: <title>", body = the report). Records the ADO id -> issue mapping, comments
-# back on the ADO ticket, and swaps its tag from $MIGRATION_TAG to MigratedToGitHub. Respects
+# (title "$GITHUB_ISSUE_TITLE_PREFIX<title>", body = the report). Records the ADO id -> issue mapping, comments
+# back on the ADO ticket, and swaps its tag from $MIGRATION_TAG to $MIGRATED_TAG. Respects
 # --live/dry-run: prints a preview and returns without creating anything real when not --live.
 # Args: <ado-id> <bug-title> <ado-url> <report-file>
 # Prints the new issue number on success (live only).
 create_tracking_issue() {
   local ado_id="$1" title="$2" ado_url="$3" report_file="$4"
-  local issue_title="Fix: $title"
+  local issue_title="${GITHUB_ISSUE_TITLE_PREFIX}${title}"
   local body
   body=$(cat "$report_file")
   body="${body}
@@ -275,7 +276,7 @@ ADO-#${ado_id}
 ${ado_url}"
 
   if [ "$LIVE" != true ]; then
-    log "DRY RUN (pass --live to actually do this): gh issue create --repo $GITHUB_ORG/$GITHUB_REPO --title '$issue_title' --type Bug --label bug"
+    log "DRY RUN (pass --live to actually do this): gh issue create --repo $GITHUB_ORG/$GITHUB_REPO --title '$issue_title' --type $GITHUB_ISSUE_TYPE --label $GITHUB_ISSUE_LABEL"
     echo "----- tracking issue body preview for ADO-#$ado_id -----"
     echo "$body"
     echo "----------------------------------------------------------"
@@ -283,7 +284,7 @@ ${ado_url}"
   fi
 
   local issue_url issue_number
-  issue_url=$(gh issue create --repo "$GITHUB_ORG/$GITHUB_REPO" --title "$issue_title" --body "$body" --label bug --type Bug)
+  issue_url=$(gh issue create --repo "$GITHUB_ORG/$GITHUB_REPO" --title "$issue_title" --body "$body" --label "$GITHUB_ISSUE_LABEL" --type "$GITHUB_ISSUE_TYPE")
   issue_number=$(echo "$issue_url" | grep -oE '[0-9]+$')
   if [ -z "$issue_number" ]; then
     echo "create_tracking_issue: failed to parse issue number from: $issue_url" >&2
@@ -293,7 +294,7 @@ ${ado_url}"
   ado_map_set "$ado_id" "$issue_number"
   az boards work-item update --id "$ado_id" --organization "$ADO_ORG" \
     --discussion "RCA complete - tracking issue created: #$issue_number ($issue_url)" >/dev/null
-  replace_ado_migration_tag "$ado_id" "MigratedToGitHub"
+  replace_ado_migration_tag "$ado_id" "$MIGRATED_TAG"
 
   set_tracking_issue_project_fields "$issue_number" "$ado_id"
 

@@ -10,21 +10,20 @@ process once the tracking issue exists. See `docs/process-summary.md` for the fu
 
 ## Getting Started
 
-1. Run the setup script: `./scripts/install-dependencies.sh`
-2. Configure `configs/system.conf` (GitHub org/repo, ADO org/project, target app repo location)
-3. Configure credentials (see below)
-4. Tag the ADO bugs you want migrated with `MigrateToGitHub`
-5. Run the system (dry run first - see below)
+1. Install: `./install.sh` (see the [Setup Guide](setup-guide.md))
+2. Start Herdr in a separate terminal: `herdr`
+3. Tag the ADO bugs you want migrated with `MigrateToGitHub`
+4. Run the system (dry run first - see below)
 
 ## Configuration
 
-Copy `configs/credentials.conf.example` to `configs/credentials.conf` and fill in what's
-missing:
-- `GITHUB_TOKEN` - only needed if `gh` isn't already authenticated in this shell
-- `ADO_PAT` - only needed if `az` isn't already authenticated
+`configs/system.conf` holds every setting, with boostCX defaults: GitHub org/repo and issue
+label/type, ADO org/project/work-item states, the target app repo's location, the migration
+tags, the RCA agent name, parallelism and Herdr timeouts. Override any of them per machine in
+`configs/system.local.conf` (copy `system.local.conf.example`; gitignored).
 
-`configs/system.conf` holds everything else: GitHub org/repo, ADO org/project, the target app
-repo's location, the migration tag, and Herdr agent settings.
+`configs/credentials.conf` is optional - only needed to use tokens instead of the interactive
+logins `install.sh` sets up (copy `credentials.conf.example`).
 
 ## Running the System
 
@@ -47,19 +46,14 @@ directly if you want the same behavior without the wrapper.
 - `agents/` - vendored copy of `bcx-bug-rca-agent.md`, installed into the target app repo if
   missing there
 - `scripts/`: automation scripts (`scripts/lib/` has shared helpers)
-- `configs/`: `system.conf` and `credentials.conf` (gitignored)
+- `configs/`: `system.conf`, plus optional gitignored `system.local.conf` and `credentials.conf`
 - `docs/`: documentation (this guide, process summary, troubleshooting)
 - `state/`: `ado-to-github-map.json` - which ADO bugs already have a GitHub issue, or are
   `BLOCKED` pending more information
-- `logs/`, `temp/`: runtime output
-- `win-scripts/`: Windows batch scripts
+- `logs/`, `temp/`: runtime output (`temp/ado-bugs.json`, per-bug `temp/log-<id>.txt`)
+- `win-scripts/`: `install.bat` and `run.bat` for launching from Windows
 
 ## Prerequisites
 
-- WSL2 Ubuntu with `gh`, `az` (+ `azure-devops` extension), `jq`, and `herdr` installed and
-  authenticated
-- A `claude` CLI reachable from WSL
-- The target app repo cloned separately at the path configured by `APP_REPO_DIR` (cloned
-  automatically on first run if missing)
-
-See `README.md` for the full prerequisite and configuration reference.
+Everything is installed by `./install.sh` - see the [Setup Guide](setup-guide.md). Check the
+installation any time with `./install.sh --check`.

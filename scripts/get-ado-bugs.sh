@@ -1,7 +1,7 @@
 #!/bin/bash
-# Queries Azure DevOps for New-state Bug work items tagged $MIGRATION_TAG, excludes bugs already
-# migrated (tracked in state/ado-to-github-map.json), and writes the result to ado-bugs.json
-# in the current directory. Each collected bug's ADO State is set to Active (New -> Active),
+# Queries Azure DevOps for $ADO_NEW_STATE-state $ADO_WORK_ITEM_TYPE work items tagged $MIGRATION_TAG,
+# excludes bugs already migrated (tracked in state/ado-to-github-map.json), and writes the result
+# to $ADO_BUGS_FILE. Each collected bug's ADO State is set to $ADO_ACTIVE_STATE,
 # which also drops it out of this query on future runs. Dry-run unless --live is passed.
 #
 # Usage: ./get-ado-bugs.sh [--limit N] [--live]
@@ -9,11 +9,11 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 parse_common_args "$@"
 
-WIQL="SELECT [System.Id],[System.Title],[System.Description],[System.Tags],[System.State] FROM WorkItems WHERE [System.WorkItemType]='Bug' AND [System.Tags] CONTAINS '$MIGRATION_TAG' AND [System.State] = 'New'"
+WIQL="SELECT [System.Id],[System.Title],[System.Description],[System.Tags],[System.State] FROM WorkItems WHERE [System.WorkItemType]='$ADO_WORK_ITEM_TYPE' AND [System.Tags] CONTAINS '$MIGRATION_TAG' AND [System.State] = '$ADO_NEW_STATE'"
 
 # Never leave a previous run's results behind - if anything below fails, there must be no
-# ado-bugs.json for start-parallel-investigation.sh to pick up.
-rm -f ado-bugs.json
+# $ADO_BUGS_FILE for start-parallel-investigation.sh to pick up.
+rm -f "$ADO_BUGS_FILE"
 
 log "Querying ADO ($ADO_ORG / $ADO_PROJECT) for bugs tagged '$MIGRATION_TAG'..."
 
@@ -27,7 +27,7 @@ fi
 ids=$(echo "$query_result" | jq -r '.[].id')
 if [ -z "$ids" ]; then
   log "No bugs found tagged '$MIGRATION_TAG'."
-  echo "[]" > ado-bugs.json
+  echo "[]" > "$ADO_BUGS_FILE"
   exit 0
 fi
 
@@ -51,8 +51,8 @@ for id in $ids; do
 
   if ! item=$(az boards work-item show --id "$id" --organization "$ADO_ORG" -o json); then
     # Skip rather than abort: bugs already collected this run have been set Active and must
-    # still reach ado-bugs.json. This one is left New, so the next run picks it up.
-    log "Bug $id: failed to fetch work item - skipping (left in New for a future run)"
+    # still reach $ADO_BUGS_FILE. This one is left $ADO_NEW_STATE, so the next run picks it up.
+    log "Bug $id: failed to fetch work item - skipping (left in $ADO_NEW_STATE for a future run)"
     continue
   fi
   # This org's Bug work items don't populate System.Description - the real content lives in
@@ -72,15 +72,15 @@ for id in $ids; do
   }')
   bugs_json=$(echo "$bugs_json" | jq --argjson e "$entry" '. + [$e]')
   count=$((count + 1))
-  set_ado_active "$id" || log "Bug $id: failed to set ADO state to Active (continuing)"
+  set_ado_active "$id" || log "Bug $id: failed to set ADO state to $ADO_ACTIVE_STATE (continuing)"
   if [ "$count" -ge "$LIMIT" ]; then
     break
   fi
 done
 
-echo "$bugs_json" > ado-bugs.json
+echo "$bugs_json" > "$ADO_BUGS_FILE"
 remaining_new=$((total_found - already_tracked - count))
-log "Including $count of $total_found bug(s) this run (limit=$LIMIT; $already_tracked already tracked). Wrote ado-bugs.json"
+log "Including $count of $total_found bug(s) this run (limit=$LIMIT; $already_tracked already tracked). Wrote $ADO_BUGS_FILE"
 if [ "$remaining_new" -gt 0 ]; then
   log "$remaining_new new bug(s) left for a future run - pass --limit N to process more at once."
 fi

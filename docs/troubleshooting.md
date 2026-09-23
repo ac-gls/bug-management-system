@@ -71,14 +71,15 @@ under `$APP_REPO_DIR/.git/worktrees` and must be serialized (already handled via
 ## Common Issues
 
 ### Authentication Errors
-- Verify credentials in configs/credentials.conf
-- Ensure tokens have proper permissions
-- Check that tokens haven't expired
+- Run `./install.sh --check` to see which login failed, then `./scripts/authenticate.sh`
+- If using `configs/credentials.conf`, check the tokens haven't expired and have the right
+  scopes (GitHub: repo, read:org, project; ADO: Work Items read & write)
 
 ### Dependency Issues
-- Run scripts/install-dependencies.sh to reinstall
-- Check internet connectivity
-- Verify sudo privileges
+- Re-run `./install.sh` - it installs only what's missing
+- Check internet connectivity and sudo privileges
+- `herdr`/`claude` "not found": open a new terminal (or `source ~/.bashrc`) so `~/.local/bin`
+  is on `PATH`
 
 ### WSL Issues
 - Ensure WSL2 is properly installed
@@ -97,17 +98,16 @@ under `$APP_REPO_DIR/.git/worktrees` and must be serialized (already handled via
 
 ## Debugging Steps
 
-1. Run scripts/status-check.sh to diagnose system status
-2. Check logs in the logs/ directory
-3. Verify configuration files in configs/
-4. Re-run installation script if needed
+1. Run `./install.sh --check` to diagnose the installation
+2. Check the per-bug log for the failing bug: `temp/log-<ado-id>.txt`
+3. Verify settings in `configs/system.conf` (and `configs/system.local.conf` if you have one)
+4. Re-run `./install.sh` if needed
 
 ## Log Files
 
-Check the following log files for detailed error information:
-- Installation logs in logs/install.log
-- Runtime logs in logs/runtime.log
-- Error logs in logs/error.log
+- `temp/log-<ado-id>.txt` - full log of one bug's investigation
+- `temp/rca-<ado-id>.md` - the report the agent wrote
+- `temp/rca-<ado-id>-raw-capture.log` - pane output captured when an agent produced no report
 
 ## Support
 

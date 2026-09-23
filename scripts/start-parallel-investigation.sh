@@ -1,5 +1,5 @@
 #!/bin/bash
-# For each bug in ado-bugs.json not already tracked (state/ado-to-github-map.json), starts a
+# For each bug in $ADO_BUGS_FILE not already tracked (state/ado-to-github-map.json), starts a
 # real `claude` agent in its own herdr pane and asks it to run this repo's own
 # bcx-bug-rca-agent directly against the ADO ticket - no GitHub issue exists yet at this
 # point. The agent explicitly stops after producing a resolution plan; it never writes code
@@ -13,25 +13,25 @@
 # finished investigating, not kept around between runs. Each bug still gets its own herdr
 # pane/agent process; they just all read the same directory.
 #
-# The ADO ticket's State is already Active by this point - get-ado-bugs.sh sets it when the
+# The ADO ticket's State is already $ADO_ACTIVE_STATE by this point - get-ado-bugs.sh sets it when the
 # bug is collected.
 #
 # Exactly one of two things happens as the deterministic final step, never both and never
 # neither:
 #   - A real resolution plan was produced -> the tracking GitHub issue is created FROM that
-#     report (title "Fix: <title>", body = the resolution plan itself, matching
+#     report (title "$GITHUB_ISSUE_TITLE_PREFIX<title>", body = the resolution plan itself, matching
 #     bcx-bug-rca-agent's own Step 4 convention) rather than pre-creating a plain issue that
 #     just replicates the ADO ticket's raw description. The ADO ticket's tag is swapped from
-#     MigrateToGitHub to MigratedToGitHub.
+#     $MIGRATION_TAG to $MIGRATED_TAG.
 #   - The agent hit its own Step 0 "BLOCKER FOUND" case (not enough information to
 #     investigate) -> no GitHub issue is created; instead a comment is posted on the ADO
 #     ticket stating more information is required, with the specific blocker detail, and its
-#     tag is swapped from MigrateToGitHub to RequiresAdditionalInformation. The bug is also
+#     tag is swapped from $MIGRATION_TAG to $BLOCKED_TAG. The bug is also
 #     recorded in state/ado-to-github-map.json (as "BLOCKED") as a redundant safety net in
 #     case the tag write itself fails - clear both once the ticket has enough information to
-#     retry (re-adding the MigrateToGitHub tag).
+#     retry (re-adding the $MIGRATION_TAG tag).
 #
-# Either tag swap naturally excludes the bug from future MigrateToGitHub-tagged WIQL queries,
+# Either tag swap naturally excludes the bug from future $MIGRATION_TAG-tagged WIQL queries,
 # on top of the existing state-file-based skip check in get-ado-bugs.sh.
 #
 # Parallelism: herdr's `agent prompt` only reliably delivers the submitting Enter keystroke
@@ -59,8 +59,8 @@
 # status table (see scripts/lib/ui.sh) until every bug reaches a terminal status.
 #
 # Usage: ./start-parallel-investigation.sh [--live] [--branch <name>]
-# --branch (default "main") is the origin branch the shared investigation worktree is checked
-# out from - applies to every bug in ado-bugs.json for this run.
+# --branch (default $DEFAULT_BASE_BRANCH) is the origin branch the shared investigation worktree is checked
+# out from - applies to every bug in $ADO_BUGS_FILE for this run.
 # Investigation itself always runs (it's non-destructive - a read-only worktree + an agent
 # conversation). --live only gates whether the tracking issue + ADO comment-back actually get
 # created; without it, the resolution plan is printed for review instead.
@@ -70,14 +70,14 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/herdr.sh"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/ui.sh"
 parse_common_args "$@"
 
-if [ ! -f ado-bugs.json ]; then
-  log "ado-bugs.json not found - run get-ado-bugs.sh first"
+if [ ! -f "$ADO_BUGS_FILE" ]; then
+  log "$ADO_BUGS_FILE not found - run get-ado-bugs.sh first"
   exit 1
 fi
 
 ensure_app_clone
 
-count=$(jq 'length' ado-bugs.json)
+count=$(jq 'length' "$ADO_BUGS_FILE")
 if [ "$count" -eq 0 ]; then
   log "No bugs to investigate."
   exit 0
@@ -123,7 +123,7 @@ investigate_one() {
   # output.
   rm -f "$worktree_path/$report_filename"
 
-  local prompt="Use the bcx-bug-rca-agent to investigate ADO ticket $ado_id (organization $ADO_ORG, project \"$ADO_PROJECT\") in $GITHUB_ORG/$GITHUB_REPO. There is no GitHub issue for this bug yet. Produce your resolution plan and stop - do not create a tracking issue and do not proceed to implementation; the tracking issue will be created from your report separately. This worktree is shared read-only across every bug investigated in this run and will be deleted once they all finish - do not modify, create, or commit any file except $report_filename, and skip your own Step 3.5 (Banyan Memory Bank knowledge saving) entirely since nothing written here persists. Write the complete report as clean, well-formatted Markdown to a file named $report_filename in the current directory - proper headings, code fences for file paths/snippets, no terminal chrome or box-drawing characters, nothing that isn't meant to appear as the body of a GitHub issue. Start the file with a single top-level heading. When the file is written, reply in chat with just a one-line confirmation - do not repeat the report content in chat. If your own Step 0 Bug Clarity Check fails and you cannot proceed, write that same $report_filename file starting with the exact line 'BLOCKER FOUND' (all caps, nothing before it) followed by the Type/Issue/Detail/Recommendation from your blocker report - do not fabricate a resolution plan when the check fails."
+  local prompt="Use the $RCA_AGENT_NAME to investigate ADO ticket $ado_id (organization $ADO_ORG, project \"$ADO_PROJECT\") in $GITHUB_ORG/$GITHUB_REPO. There is no GitHub issue for this bug yet. Produce your resolution plan and stop - do not create a tracking issue and do not proceed to implementation; the tracking issue will be created from your report separately. This worktree is shared read-only across every bug investigated in this run and will be deleted once they all finish - do not modify, create, or commit any file except $report_filename, and skip your own Step 3.5 (Banyan Memory Bank knowledge saving) entirely since nothing written here persists. Write the complete report as clean, well-formatted Markdown to a file named $report_filename in the current directory - proper headings, code fences for file paths/snippets, no terminal chrome or box-drawing characters, nothing that isn't meant to appear as the body of a GitHub issue. Start the file with a single top-level heading. When the file is written, reply in chat with just a one-line confirmation - do not repeat the report content in chat. If your own Step 0 Bug Clarity Check fails and you cannot proceed, write that same $report_filename file starting with the exact line 'BLOCKER FOUND' (all caps, nothing before it) followed by the Type/Issue/Detail/Recommendation from your blocker report - do not fabricate a resolution plan when the check fails."
 
   log "[$ado_id] Prompting agent $name..."
   set_bug_status "$ado_id" investigating "agent running"
@@ -151,7 +151,7 @@ investigate_one() {
 
   # A real resolution plan or BLOCKER FOUND report is always substantial (headings, several
   # paragraphs); a near-empty file is just as suspicious as a missing one.
-  if [ "$(wc -c < "$report_file")" -lt 200 ]; then
+  if [ "$(wc -c < "$report_file")" -lt "$MIN_REPORT_BYTES" ]; then
     log "[$ado_id] $report_filename exists but is suspiciously small ($(wc -c < "$report_file") bytes) - not creating a tracking issue from it. Leaving pane open for manual inspection (workspace $ws)."
     set_bug_status "$ado_id" failed "report too small, pane left open (workspace $ws)"
     return 1
@@ -176,7 +176,7 @@ investigate_one() {
   fi
 }
 
-jq -c '.[]' ado-bugs.json | while read -r bug; do
+jq -c '.[]' "$ADO_BUGS_FILE" | while read -r bug; do
   ado_id=$(echo "$bug" | jq -r '.id')
   title=$(echo "$bug" | jq -r '.title')
   url=$(echo "$bug" | jq -r '.url')
@@ -185,7 +185,7 @@ done > "$TEMP_DIR/investigation-targets.tsv"
 
 pids=()
 ado_ids=()
-max_parallel="${MAX_PARALLEL_INVESTIGATIONS:-4}"
+max_parallel="$MAX_PARALLEL_INVESTIGATIONS"
 while IFS=$'\t' read -r ado_id title url; do
   set_bug_status "$ado_id" queued
   # Cap how many of these run at once (see the Parallelism note above) - block here until a

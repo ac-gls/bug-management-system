@@ -26,11 +26,11 @@ log "=== Phase 1: Querying ADO for tagged bugs ==="
 GET_ARGS=(--limit "$LIMIT")
 [ "$LIVE" = true ] && GET_ARGS+=(--live)
 if ! "$SCRIPT_DIR/get-ado-bugs.sh" "${GET_ARGS[@]}"; then
-  log "Phase 1 failed - stopping before investigation so a stale ado-bugs.json isn't processed."
+  log "Phase 1 failed - stopping before investigation so a stale $ADO_BUGS_FILE isn't processed."
   exit 1
 fi
 
-log "=== Phase 2: Parallel investigation (bcx-bug-rca-agent) ==="
+log "=== Phase 2: Parallel investigation ($RCA_AGENT_NAME) ==="
 "$SCRIPT_DIR/start-parallel-investigation.sh" "${ARGS[@]}"
 
 log "Bug migration pass complete."

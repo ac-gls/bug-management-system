@@ -52,32 +52,43 @@ invocation and isn't persisted anywhere.
   - a defensive fallback, not a fork of the real thing.
 - `scripts/` - automation scripts (`scripts/lib/` has shared helpers: `common.sh` for
   config/state/worktrees, `herdr.sh` for driving Claude Code agents through Herdr panes)
-- `configs/` - `system.conf` (org/repo/ADO settings) and `credentials.conf` (gitignored tokens)
+- `configs/` - `system.conf` (every setting), plus optional gitignored `system.local.conf`
+  (per-machine overrides) and `credentials.conf` (tokens)
 - `docs/` - user guide, process summary, migration process, troubleshooting, and a from-scratch
   setup walkthrough (see Documentation below)
 - `state/` - `ado-to-github-map.json` (which ADO bugs have a GitHub issue, or are `BLOCKED`)
 - `logs/`, `temp/` - runtime output
-- `win-scripts/` - Windows batch wrappers
+- `win-scripts/` - `install.bat` / `run.bat`, for launching from Windows via WSL
 
-## Prerequisites
-- WSL2 Ubuntu with `gh`, `az` (+ `azure-devops` extension, `az devops configure -d
-  organization=... project=...`), `jq`, and `herdr` installed and authenticated
-- A `claude` CLI reachable from WSL (native install, or a `~/.local/bin/claude` wrapper
-  execing a Windows-side `claude.exe` via WSL interop)
-- A running herdr server/session (`herdr status`) - `herdr agent start --kind claude` needs an
-  existing interactive pane, which this repo's scripts create via `herdr workspace create`
-- The target app repo (`bcx-reporting-platform`) cloned separately at the path configured by
-  `APP_REPO_DIR` in `configs/system.conf` - scripts clone it automatically on first run if
-  missing, kept independent of any other local working copy you may have
+## Install
+
+```bash
+git clone https://github.com/ac-gls/bug-management-system.git ~/source/repos/bug-management-system
+cd ~/source/repos/bug-management-system
+./install.sh          # installs gh, az (+ azure-devops), jq, herdr, Claude Code; logs you in
+./install.sh --check  # verify an installation - changes nothing
+```
+
+Runs on Ubuntu/Debian or WSL2 (on Windows, `win-scripts\install.bat` does the same). Safe to
+re-run. Full walkthrough: [Setup Guide](docs/setup-guide.md).
+
+Each run also needs a Herdr server: start `herdr` in a separate terminal first - the agents run
+in its panes (`herdr agent start` needs an existing interactive pane, which the scripts create
+via `herdr workspace create`).
 
 ## Configuration
 
-`configs/system.conf` - GitHub org/repo, ADO org/project, target app repo location, migration
-tag, and the herdr agent kind/timeout.
+`configs/system.conf` holds every setting, with boostCX defaults that work as-is: GitHub
+org/repo and issue label/type, ADO org/project/work-item type and states, migration tags, the
+target app repo location, the RCA agent name, parallelism, timeouts and project-board IDs.
+Paths are derived from wherever the repo is cloned.
 
-`configs/credentials.conf` (gitignored, copy from `configs/credentials.conf.example`):
-- `GITHUB_TOKEN` - only needed if `gh` isn't already authenticated in this shell
-- `ADO_PAT` - only needed if `az` isn't already authenticated
+For per-machine changes, copy `configs/system.local.conf.example` to
+`configs/system.local.conf` (gitignored, sourced after `system.conf`) instead of editing the
+tracked file.
+
+`configs/credentials.conf` is optional (gitignored, copy from `credentials.conf.example`) -
+`GITHUB_TOKEN` / `ADO_PAT` are only needed to use tokens instead of the interactive logins.
 
 ## Usage
 
@@ -101,8 +112,7 @@ were created and the shared worktree was cleaned up).
 - [Process Summary](docs/process-summary.md)
 - [Migration Process](docs/migration-process.md)
 - [Troubleshooting Guide](docs/troubleshooting.md)
-- [Setup Guide](docs/setup-guide.md) - a from-scratch install walkthrough; still illustrative in
-  places (some snippets predate the real scripts) rather than a byte-for-byte mirror of them
+- [Setup Guide](docs/setup-guide.md) - installing on a new machine
 
 If any doc and the actual code disagree, `scripts/*.sh` header comments are authoritative.
 
