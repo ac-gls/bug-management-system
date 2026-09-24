@@ -19,8 +19,8 @@ process once the tracking issue exists. See `docs/process-summary.md` for the fu
 
 `configs/system.conf` holds every setting, with boostCX defaults: GitHub org/repo and issue
 label/type, ADO org/project/work-item states, the target app repo's location, the migration
-tags, the RCA agent name, parallelism and Herdr timeouts. Override any of them per machine in
-`configs/system.local.conf` (copy `system.local.conf.example`; gitignored).
+tags, the RCA agent name, parallelism and Herdr timeouts. Change them per machine with
+`./install.sh --configure`, which saves overrides to `configs/system.local.conf` (gitignored).
 
 `configs/credentials.conf` is optional - only needed to use tokens instead of the interactive
 logins `install.sh` sets up (copy `credentials.conf.example`).

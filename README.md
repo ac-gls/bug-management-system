@@ -65,12 +65,13 @@ invocation and isn't persisted anywhere.
 ```bash
 git clone https://github.com/ac-gls/bug-management-system.git ~/source/repos/bug-management-system
 cd ~/source/repos/bug-management-system
-./install.sh          # installs gh, az (+ azure-devops), jq, herdr, Claude Code; logs you in
-./install.sh --check  # verify an installation - changes nothing
+./install.sh              # installs gh, az (+ azure-devops), jq, herdr, Claude Code; logs you in
+./install.sh --configure  # change settings (org, repo, ADO project, paths, parallelism, ...)
+./install.sh --check      # verify an installation - changes nothing
 ```
 
-Runs on Ubuntu/Debian or WSL2 (on Windows, `win-scripts\install.bat` does the same). Safe to
-re-run. Full walkthrough: [Setup Guide](docs/setup-guide.md).
+Runs on any Ubuntu (or Debian) release, WSL2 included - on Windows, `win-scripts\install.bat`
+does the same. Safe to re-run. Full walkthrough: [Setup Guide](docs/setup-guide.md).
 
 Each run also needs a Herdr server: start `herdr` in a separate terminal first - the agents run
 in its panes (`herdr agent start` needs an existing interactive pane, which the scripts create
@@ -83,9 +84,8 @@ org/repo and issue label/type, ADO org/project/work-item type and states, migrat
 target app repo location, the RCA agent name, parallelism, timeouts and project-board IDs.
 Paths are derived from wherever the repo is cloned.
 
-For per-machine changes, copy `configs/system.local.conf.example` to
-`configs/system.local.conf` (gitignored, sourced after `system.conf`) instead of editing the
-tracked file.
+For per-machine changes, run `./install.sh --configure` (or edit `configs/system.local.conf`
+by hand - gitignored, sourced after `system.conf`) instead of editing the tracked file.
 
 `configs/credentials.conf` is optional (gitignored, copy from `credentials.conf.example`) -
 `GITHUB_TOKEN` / `ADO_PAT` are only needed to use tokens instead of the interactive logins.
