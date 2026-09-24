@@ -20,22 +20,29 @@ tracking issue (or commenting back on ADO) from what they find.
    GitHub issue exists yet. The agent stops after producing a resolution plan; it never writes
    code. The shared worktree is removed once every bug in the run has finished investigating -
    it only exists to isolate this run's code snapshot from whatever else is happening in the
-   app repo (your own separate work in another app). Exactly one of two things happens as the
-   deterministic final step:
-   - A real plan was produced -> the **tracking GitHub issue is created from that report**
-     (title `Fix: <bug title>`, body = the resolution plan itself, matching
-     `bcx-bug-rca-agent`'s own Step 4 convention) rather than pre-creating a plain issue that
-     just replicates the ADO ticket's raw description. The ADO ticket gets a comment linking to
-     it.
+   app repo (your own separate work in another app). Exactly one of three things happens as
+   the deterministic final step (otherwise the bug fails and its pane is left open):
+   - A complete plan was produced -> the **tracking GitHub issue is created from that report**
+     (title `Fix: <bug title>`), rendered through `templates/tracking-issue.md`, which adds the
+     commit that was investigated and the `ADO-#<id>` link. The report must contain every
+     heading in `REQUIRED_REPORT_SECTIONS` (Root Cause Analysis, Resolution Plan, Root Cause
+     Summary, Defect Location, Proposed Fix, Files to Modify, Tenant Safety, Regression Risk) -
+     one that doesn't is treated as a failed investigation, not turned into an issue. The ADO
+     ticket gets a comment linking to it.
    - The agent hit its own Step 0 "BLOCKER FOUND" case (not enough information to
      investigate) -> **no GitHub issue is created**; instead a comment is posted on the ADO
      ticket saying more information is required, with the specific blocker detail. The bug is
      marked `BLOCKED` in `state/ado-to-github-map.json` so it isn't re-investigated and
      re-commented on every future run - clear that entry once the ticket has enough
      information to retry.
-2. **Human review**: read the tracking issue - it *is* the RCA output, not an ADO copy. What
-   happens after that (approving, assigning, implementing the fix) is up to your own team's
-   process; it's outside this repo's scope.
+   - The agent found the bug **already fixed** in the investigated code -> **no GitHub issue
+     is created**; its evidence (which commit fixed it, how it verified that) is posted as an
+     ADO comment, the tag becomes `AlreadyFixed`, and the bug is marked `ALREADY_FIXED` in the
+     state file.
+2. **The tracking issue is the end of this system.** It *is* the RCA and resolution plan, not
+   an ADO copy (the bug itself stays in ADO), written to stand on its own so a separate
+   resolution process can implement from it without re-investigating. Implementing,
+   approving or assigning fixes is out of this repo's scope.
 
 Everything defaults to a **dry run** (`--limit 1`, no `--live`) so you can review exactly what
 would be created before anything touches real ADO tickets or GitHub issues.
@@ -56,7 +63,9 @@ invocation and isn't persisted anywhere.
   (per-machine overrides) and `credentials.conf` (tokens)
 - `docs/` - user guide, process summary, migration process, troubleshooting, and a from-scratch
   setup walkthrough (see Documentation below)
-- `state/` - `ado-to-github-map.json` (which ADO bugs have a GitHub issue, or are `BLOCKED`)
+- `state/` - `ado-to-github-map.json` (which ADO bugs have a GitHub issue, or are `BLOCKED` /
+  `ALREADY_FIXED`)
+- `templates/` - `tracking-issue.md`, the body of every tracking issue (`TRACKING_ISSUE_TEMPLATE`)
 - `logs/`, `temp/` - runtime output
 - `win-scripts/` - `install.bat` / `run.bat`, for launching from Windows via WSL
 

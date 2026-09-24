@@ -30,6 +30,13 @@ is your team's own process.
   structured entry (title, description/repro steps, expected/actual results, tenant, priority,
   tags, state, ADO URL) to `temp/ado-bugs.json`, and sets that ADO ticket's State to `Active`
   (`--live` only).
+- **Failed bugs go back to `New`.** Only `New` bugs are collected, so a bug left `Active` would
+  never be retried. Any bug that doesn't finish is returned to `New` (`return_ado_to_new` in
+  `scripts/lib/common.sh`): a failure during its investigation (pane/agent start, timeout,
+  missing, tiny or incomplete report, issue creation failing), the run aborting before or during
+  investigation (clone/fetch or worktree failure, Ctrl-C, a crash), or `get-ado-bugs.sh` itself
+  dying before writing `temp/ado-bugs.json`. Bugs that finish - issue created, blocker, already
+  fixed - keep `Active`.
 
 ## Phase 2: Parallel Investigation (`start-parallel-investigation.sh`)
 
@@ -59,16 +66,22 @@ is your team's own process.
   each bug's own detail (prompts, dry-run previews, blocker content) goes to
   `temp/log-<ado-id>.txt` instead. See `troubleshooting.md` for reading it during/after a run.
 - Exactly one deterministic outcome follows, decided by script logic - never the agent itself:
-  - **Resolution plan produced** -> a GitHub tracking issue is created from the report
-    (`create_tracking_issue` in `scripts/lib/common.sh`): title `Fix: <ADO bug title>`, body =
-    the report verbatim plus an `ADO-#<id>` footer. The ADO ticket gets a comment linking to
-    the new issue, and its tag flips `MigrateToGitHub` -> `MigratedToGitHub`.
+  - **Resolution plan produced** -> the report is checked for every heading in
+    `REQUIRED_REPORT_SECTIONS` (`report_missing_sections`); if any is missing the bug fails
+    with the missing sections listed and its pane left open. Otherwise a GitHub tracking issue
+    is created (`create_tracking_issue` in `scripts/lib/common.sh`): title
+    `Fix: <ADO bug title>`, body = `templates/tracking-issue.md` with the report, the
+    investigated branch and commit, and an `ADO-#<id>` footer filled in. The ADO ticket gets a
+    comment linking to the new issue, and its tag flips `MigrateToGitHub` -> `MigratedToGitHub`.
   - **Blocker found** (the agent's own Step 0 clarity check failed) -> no GitHub issue is
     created. The report's content is instead posted as an ADO comment
     (`post_ado_blocker_comment`), the ticket's tag flips to `RequiresAdditionalInformation`, and
     the bug is marked `BLOCKED` in `state/ado-to-github-map.json` so it's skipped on future runs
     until you clear that entry (and re-add the migration tag) once more information is
     available.
+  - **Already fixed** (report starts `ALREADY FIXED`) -> no GitHub issue is created. The
+    agent's evidence is posted as an ADO comment (`post_ado_already_fixed_comment`), the tag
+    flips to `AlreadyFixed`, and the bug is marked `ALREADY_FIXED` in the state file.
 
 ## Dry run vs. live
 

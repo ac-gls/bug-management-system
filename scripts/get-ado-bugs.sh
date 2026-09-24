@@ -37,12 +37,27 @@ log "Found $total_found bug(s) tagged '$MIGRATION_TAG' total (before limit/alrea
 bugs_json="[]"
 count=0
 already_tracked=0
+
+# Bugs set Active below only reach start-parallel-investigation.sh via $ADO_BUGS_FILE. If this
+# script dies before writing it (error, Ctrl-C), return them to $ADO_NEW_STATE rather than
+# leaving them Active and never collected again.
+collected_ids=()
+bugs_file_written=false
+return_collected_on_abort() {
+  [ "$bugs_file_written" = true ] && return
+  local id
+  for id in "${collected_ids[@]}"; do return_ado_to_new "$id"; done
+}
+trap return_collected_on_abort EXIT
+trap 'exit 130' INT TERM
 for id in $ids; do
   existing=$(ado_map_get "$id")
   if [ -n "$existing" ]; then
     already_tracked=$((already_tracked + 1))
     if [ "$existing" = "BLOCKED" ]; then
       log "Bug $id previously hit a blocker (needs more info) - skipping until state/ado-to-github-map.json is cleared for it"
+    elif [ "$existing" = "ALREADY_FIXED" ]; then
+      log "Bug $id was found already fixed - skipping until state/ado-to-github-map.json is cleared for it"
     else
       log "Bug $id already migrated -> GitHub issue #$existing, skipping"
     fi
@@ -72,13 +87,17 @@ for id in $ids; do
   }')
   bugs_json=$(echo "$bugs_json" | jq --argjson e "$entry" '. + [$e]')
   count=$((count + 1))
-  set_ado_active "$id" || log "Bug $id: failed to set ADO state to $ADO_ACTIVE_STATE (continuing)"
+  if set_ado_active "$id"; then
+    collected_ids+=("$id")
+  else
+    log "Bug $id: failed to set ADO state to $ADO_ACTIVE_STATE (continuing)"
+  fi
   if [ "$count" -ge "$LIMIT" ]; then
     break
   fi
 done
 
-echo "$bugs_json" > "$ADO_BUGS_FILE"
+echo "$bugs_json" > "$ADO_BUGS_FILE" && bugs_file_written=true
 remaining_new=$((total_found - already_tracked - count))
 log "Including $count of $total_found bug(s) this run (limit=$LIMIT; $already_tracked already tracked). Wrote $ADO_BUGS_FILE"
 if [ "$remaining_new" -gt 0 ]; then

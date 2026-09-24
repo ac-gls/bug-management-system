@@ -47,9 +47,23 @@ check the ADO ticket's `System.Title` field, not the report content.
 ### A bug never gets investigated even though it's tagged `MigrateToGitHub`
 
 Check `state/ado-to-github-map.json` - a bug already mapped to an issue number, or marked
-`BLOCKED`, is skipped by `get-ado-bugs.sh` on every subsequent run. Clear its entry (and, for a
-blocked bug, re-add the `MigrateToGitHub` tag in ADO - the pipeline swaps it to
-`RequiresAdditionalInformation` on blocking) to have it picked up again.
+`BLOCKED` / `ALREADY_FIXED`, is skipped by `get-ado-bugs.sh` on every subsequent run. Clear its
+entry (and re-add the `MigrateToGitHub` tag in ADO - the pipeline swaps it to
+`RequiresAdditionalInformation` or `AlreadyFixed`) to have it picked up again.
+
+### A bug fails with "report missing: ..."
+
+The agent's report lacked one or more `REQUIRED_REPORT_SECTIONS` headings, so no issue was
+created - an incomplete plan can't be implemented from later. The report is kept at
+`temp/rca-<ado-id>.md` and the pane is left open. The ADO ticket is set back to `New`
+automatically, so the next run retries it - or adjust `REQUIRED_REPORT_SECTIONS` in
+`configs/system.local.conf` if the required set is wrong.
+
+### A failed bug is still `Active` in ADO
+
+Failed and unfinished bugs are returned to `New` automatically. If that write itself fails, the
+bug's status says "could not reset ADO to New" and its log has a WARNING - set it to `New` by
+hand to have it retried.
 
 ### Leftover worktree under `$APP_WORKTREE_DIR`
 

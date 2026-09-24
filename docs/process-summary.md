@@ -48,8 +48,9 @@ code snapshot, not to persist anything.
 
 State that prevents duplicate/racing work:
 
-- `state/ado-to-github-map.json` - which ADO bugs already have a GitHub issue, or are
-  `BLOCKED` pending more information. Both exclude a bug from future runs until cleared.
+- `state/ado-to-github-map.json` - which ADO bugs already have a GitHub issue, are `BLOCKED`
+  pending more information, or were found `ALREADY_FIXED`. All exclude a bug from future runs
+  until cleared.
 - Every mutating step (issue creation, ADO comments, tag changes) is decided by deterministic
   script logic reading a verified report file - never by trusting an agent's own claim of
   success.

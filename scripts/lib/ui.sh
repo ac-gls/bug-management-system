@@ -26,7 +26,7 @@ get_bug_status() {
 # A status this bug will not move on from without a new run - the UI loop stops waiting on it.
 is_terminal_status() {
   case "$1" in
-    issue-created|dry-run|blocked|failed) return 0 ;;
+    issue-created|dry-run|blocked|already-fixed|failed) return 0 ;;
     *) return 1 ;;
   esac
 }

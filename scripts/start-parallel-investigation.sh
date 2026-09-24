@@ -16,12 +16,13 @@
 # The ADO ticket's State is already $ADO_ACTIVE_STATE by this point - get-ado-bugs.sh sets it when the
 # bug is collected.
 #
-# Exactly one of two things happens as the deterministic final step, never both and never
-# neither:
-#   - A real resolution plan was produced -> the tracking GitHub issue is created FROM that
-#     report (title "$GITHUB_ISSUE_TITLE_PREFIX<title>", body = the resolution plan itself, matching
-#     bcx-bug-rca-agent's own Step 4 convention) rather than pre-creating a plain issue that
-#     just replicates the ADO ticket's raw description. The ADO ticket's tag is swapped from
+# Exactly one of three things happens as the deterministic final step (or the bug fails and
+# its pane is left open for inspection):
+#   - A real resolution plan was produced, containing every REQUIRED_REPORT_SECTIONS heading ->
+#     the tracking GitHub issue is created FROM that report (title
+#     "$GITHUB_ISSUE_TITLE_PREFIX<title>", body = the report rendered through
+#     TRACKING_ISSUE_TEMPLATE, which adds the investigated commit and the ADO link) rather
+#     than pre-creating a plain issue that just replicates the ADO ticket's raw description. The ADO ticket's tag is swapped from
 #     $MIGRATION_TAG to $MIGRATED_TAG.
 #   - The agent hit its own Step 0 "BLOCKER FOUND" case (not enough information to
 #     investigate) -> no GitHub issue is created; instead a comment is posted on the ADO
@@ -30,8 +31,12 @@
 #     recorded in state/ado-to-github-map.json (as "BLOCKED") as a redundant safety net in
 #     case the tag write itself fails - clear both once the ticket has enough information to
 #     retry (re-adding the $MIGRATION_TAG tag).
+#   - The agent found the bug already fixed in the investigated code ("ALREADY FIXED" report)
+#     -> no GitHub issue is created; its evidence is posted as an ADO comment, the tag is
+#     swapped from $MIGRATION_TAG to $ALREADY_FIXED_TAG, and it's recorded as "ALREADY_FIXED"
+#     in state/ado-to-github-map.json.
 #
-# Either tag swap naturally excludes the bug from future $MIGRATION_TAG-tagged WIQL queries,
+# Each tag swap naturally excludes the bug from future $MIGRATION_TAG-tagged WIQL queries,
 # on top of the existing state-file-based skip check in get-ado-bugs.sh.
 #
 # Parallelism: herdr's `agent prompt` only reliably delivers the submitting Enter keystroke
@@ -75,12 +80,38 @@ if [ ! -f "$ADO_BUGS_FILE" ]; then
   exit 1
 fi
 
-ensure_app_clone
-
 count=$(jq 'length' "$ADO_BUGS_FILE")
 if [ "$count" -eq 0 ]; then
   log "No bugs to investigate."
   exit 0
+fi
+
+# Every bug in $ADO_BUGS_FILE was set $ADO_ACTIVE_STATE when collected, and only
+# $ADO_NEW_STATE bugs are collected - so any bug that doesn't finish must go back to
+# $ADO_NEW_STATE or it's never retried. Failures inside a bug's job do that themselves
+# (fail_bug); this catches everything else - the run aborting before or during investigation
+# (clone/worktree failure, Ctrl-C, a crash) - by returning every bug that hasn't reached a
+# final status.
+mapfile -t run_ado_ids < <(jq -r '.[].id' "$ADO_BUGS_FILE")
+# Status files persist in $TEMP_DIR between runs - clear this run's, or an abort would read a
+# previous run's final status and skip returning the bug.
+for ado_id in "${run_ado_ids[@]}"; do rm -f "$TEMP_DIR/status-$ado_id.status"; done
+
+return_unfinished_bugs() {
+  local ado_id
+  for ado_id in "${run_ado_ids[@]}"; do
+    case "$(get_bug_status "$ado_id")" in
+      issue-created\|*|blocked\|*|already-fixed\|*|dry-run\|*|failed\|*) ;;  # finished, or fail_bug already returned it
+      *) log "[$ado_id] Run ended before this bug finished"; return_ado_to_new "$ado_id" ;;
+    esac
+  done
+}
+trap return_unfinished_bugs EXIT
+trap 'exit 130' INT TERM
+
+if ! ensure_app_clone; then
+  log "Could not clone/fetch $APP_REPO_URL - aborting"
+  exit 1
 fi
 
 safe_base="${BASE_BRANCH//\//-}"
@@ -90,13 +121,29 @@ if [ -z "$shared_worktree_path" ]; then
   exit 1
 fi
 
-log "Investigating $count bug(s) against shared worktree $shared_worktree_path (origin/$BASE_BRANCH)..."
+# Recorded in every tracking issue - the plan's file paths and line numbers refer to this commit.
+investigated_commit=$(git -C "$shared_worktree_path" rev-parse --short HEAD)
+
+# The prompt names the required headings from config, so the check below and the prompt can
+# never drift apart.
+required_sections_list=$(printf '"%s", ' "${REQUIRED_REPORT_SECTIONS[@]}")
+required_sections_list="${required_sections_list%, }"
+
+log "Investigating $count bug(s) against shared worktree $shared_worktree_path (origin/$BASE_BRANCH @ $investigated_commit)..."
+
+# Marks a bug failed and returns its ADO ticket to $ADO_NEW_STATE so the next run retries it.
+# Args: <ado-id> <detail>
+fail_bug() {
+  local ado_id="$1" detail="$2"
+  return_ado_to_new "$ado_id" || detail="$detail; could not reset ADO to $ADO_NEW_STATE"
+  set_bug_status "$ado_id" failed "$detail"
+}
 
 # Runs the full pipeline for one bug. Meant to be invoked as a backgrounded job so multiple
 # bugs investigate concurrently. Reads from the shared worktree passed in - never creates or
 # removes a worktree of its own.
 investigate_one() {
-  local ado_id="$1" title="$2" ado_url="$3" worktree_path="$4"
+  local ado_id="$1" title="$2" ado_url="$3" worktree_path="$4" commit="$5"
   local name="rca-$ado_id"
 
   set_bug_status "$ado_id" starting "opening pane"
@@ -105,7 +152,7 @@ investigate_one() {
   read -r ws pane <<< "$(herdr_open_pane "$worktree_path" "$name")"
   if [ -z "$pane" ]; then
     log "[$ado_id] Failed to open pane, skipping"
-    set_bug_status "$ado_id" failed "pane-open, see log-$ado_id.txt"
+    fail_bug "$ado_id" "pane-open, see log-$ado_id.txt"
     return 1
   fi
 
@@ -113,7 +160,7 @@ investigate_one() {
   if ! herdr_start_claude "$name" "$pane"; then
     log "[$ado_id] Failed to start claude agent, skipping"
     herdr_close_workspace "$ws"
-    set_bug_status "$ado_id" failed "agent-start, see log-$ado_id.txt"
+    fail_bug "$ado_id" "agent-start, see log-$ado_id.txt"
     return 1
   fi
 
@@ -123,13 +170,13 @@ investigate_one() {
   # output.
   rm -f "$worktree_path/$report_filename"
 
-  local prompt="Use the $RCA_AGENT_NAME to investigate ADO ticket $ado_id (organization $ADO_ORG, project \"$ADO_PROJECT\") in $GITHUB_ORG/$GITHUB_REPO. There is no GitHub issue for this bug yet. Produce your resolution plan and stop - do not create a tracking issue and do not proceed to implementation; the tracking issue will be created from your report separately. This worktree is shared read-only across every bug investigated in this run and will be deleted once they all finish - do not modify, create, or commit any file except $report_filename, and skip your own Step 3.5 (Banyan Memory Bank knowledge saving) entirely since nothing written here persists. Write the complete report as clean, well-formatted Markdown to a file named $report_filename in the current directory - proper headings, code fences for file paths/snippets, no terminal chrome or box-drawing characters, nothing that isn't meant to appear as the body of a GitHub issue. Start the file with a single top-level heading. When the file is written, reply in chat with just a one-line confirmation - do not repeat the report content in chat. If your own Step 0 Bug Clarity Check fails and you cannot proceed, write that same $report_filename file starting with the exact line 'BLOCKER FOUND' (all caps, nothing before it) followed by the Type/Issue/Detail/Recommendation from your blocker report - do not fabricate a resolution plan when the check fails."
+  local prompt="Use the $RCA_AGENT_NAME to investigate ADO ticket $ado_id (organization $ADO_ORG, project \"$ADO_PROJECT\") in $GITHUB_ORG/$GITHUB_REPO. There is no GitHub issue for this bug yet. Produce your resolution plan and stop - do not create a tracking issue and do not proceed to implementation; the tracking issue will be created from your report separately. This worktree is shared read-only across every bug investigated in this run and will be deleted once they all finish - do not modify, create, or commit any file except $report_filename, and skip your own Step 3.5 (Banyan Memory Bank knowledge saving) entirely since nothing written here persists. Write the complete report as clean, well-formatted Markdown to a file named $report_filename in the current directory - proper headings, code fences for file paths/snippets, no terminal chrome or box-drawing characters, nothing that isn't meant to appear as the body of a GitHub issue. Start the file with a single top-level heading, then use Markdown headings with exactly these names, in this order: $required_sections_list (your Step 3 Resolution Plan subsections go under the Resolution Plan heading). The file becomes a GitHub issue that a separate process will later implement from without re-investigating, so it must stand on its own: leave out the Bug Issue subsection (no issue exists yet), the Knowledge Saved and Reviewer Checklist sections, and any hand-off or next-step instructions - document only the analysis and the plan. When the file is written, reply in chat with just a one-line confirmation - do not repeat the report content in chat. If your own Step 0 Bug Clarity Check fails and you cannot proceed, write that same $report_filename file starting with the exact line 'BLOCKER FOUND' (all caps, nothing before it) followed by the Type/Issue/Detail/Recommendation from your blocker report - do not fabricate a resolution plan when the check fails. If instead you find the bug is already fixed in this checkout, write that same $report_filename file starting with the exact line 'ALREADY FIXED' (all caps, nothing before it) followed by the evidence: the commit(s) and code that fixed it, how you verified the fix is present, and any residual observations - do not write a resolution plan for a bug that is already fixed."
 
   log "[$ado_id] Prompting agent $name..."
   set_bug_status "$ado_id" investigating "agent running"
   if ! herdr_prompt_and_wait "$name" "$prompt" "$HERDR_AGENT_TIMEOUT_MS"; then
     log "[$ado_id] Agent did not settle in time - leaving pane open for manual inspection (workspace $ws)"
-    set_bug_status "$ado_id" failed "timeout, pane left open (workspace $ws)"
+    fail_bug "$ado_id" "timeout, pane left open (workspace $ws)"
     return 1
   fi
 
@@ -143,31 +190,61 @@ investigate_one() {
     # to actually look at rather than guessing.
     log "[$ado_id] Agent settled but did not write $report_filename - not creating a tracking issue from unverified content. Leaving pane open for manual inspection (workspace $ws)."
     herdr_capture "$name" 500 > "$TEMP_DIR/rca-$ado_id-raw-capture.log"
-    set_bug_status "$ado_id" failed "no report file, pane left open (workspace $ws)"
+    fail_bug "$ado_id" "no report file, pane left open (workspace $ws)"
     return 1
   fi
   cp "$worktree_path/$report_filename" "$report_file"
   rm -f "$worktree_path/$report_filename"
 
-  # A real resolution plan or BLOCKER FOUND report is always substantial (headings, several
+  # A real resolution plan, BLOCKER FOUND or ALREADY FIXED report is always substantial (headings, several
   # paragraphs); a near-empty file is just as suspicious as a missing one.
   if [ "$(wc -c < "$report_file")" -lt "$MIN_REPORT_BYTES" ]; then
     log "[$ado_id] $report_filename exists but is suspiciously small ($(wc -c < "$report_file") bytes) - not creating a tracking issue from it. Leaving pane open for manual inspection (workspace $ws)."
-    set_bug_status "$ado_id" failed "report too small, pane left open (workspace $ws)"
+    fail_bug "$ado_id" "report too small, pane left open (workspace $ws)"
     return 1
+  fi
+
+  local outcome=plan first_line
+  first_line=$(head -n 1 "$report_file")
+  case "$first_line" in
+    "BLOCKER FOUND"*) outcome=blocker ;;
+    "ALREADY FIXED"*) outcome=already-fixed ;;
+  esac
+
+  # A plan missing a required section isn't usable as a hand-off to a later resolution
+  # process, so it's a failed investigation, not an issue. (Blocker and already-fixed reports
+  # have their own format and are exempt.)
+  if [ "$outcome" = plan ]; then
+    local missing
+    missing=$(report_missing_sections "$report_file" | paste -sd, - | sed 's/,/, /g')
+    if [ -n "$missing" ]; then
+      log "[$ado_id] $report_filename is missing required section(s): $missing - not creating a tracking issue. Report kept at $report_file; leaving pane open for manual inspection (workspace $ws)."
+      fail_bug "$ado_id" "report missing: $missing"
+      return 1
+    fi
   fi
 
   herdr_close_workspace "$ws"
 
-  if head -n 1 "$report_file" | grep -q "^BLOCKER FOUND"; then
+  if [ "$outcome" = blocker ]; then
     log "[$ado_id] Agent hit a blocker - no tracking issue will be created"
     post_ado_blocker_comment "$ado_id" "$report_file"
     set_bug_status "$ado_id" blocked "needs more info"
     return 0
   fi
+  if [ "$outcome" = already-fixed ]; then
+    log "[$ado_id] Agent found the bug already fixed - no tracking issue will be created"
+    post_ado_already_fixed_comment "$ado_id" "$report_file" "$commit"
+    set_bug_status "$ado_id" already-fixed "commented on ADO"
+    return 0
+  fi
 
   local issue_number
-  issue_number=$(create_tracking_issue "$ado_id" "$title" "$ado_url" "$report_file")
+  if ! issue_number=$(create_tracking_issue "$ado_id" "$title" "$ado_url" "$report_file" "$commit"); then
+    log "[$ado_id] Creating the tracking issue failed - see above. Report kept at $report_file"
+    fail_bug "$ado_id" "issue creation failed, see log-$ado_id.txt"
+    return 1
+  fi
   if [ "$LIVE" = true ]; then
     log "[$ado_id] Tracking issue created: #$issue_number"
     set_bug_status "$ado_id" issue-created "#$issue_number"
@@ -197,7 +274,7 @@ while IFS=$'\t' read -r ado_id title url; do
   # several bugs running at once, interleaved raw log lines were unreadable. Full detail for
   # any bug stays in $TEMP_DIR/log-<id>.txt; the main terminal (the "main" herdr space this
   # script itself runs in) shows the live status table below instead.
-  investigate_one "$ado_id" "$title" "$url" "$shared_worktree_path" > "$TEMP_DIR/log-$ado_id.txt" 2>&1 &
+  investigate_one "$ado_id" "$title" "$url" "$shared_worktree_path" "$investigated_commit" > "$TEMP_DIR/log-$ado_id.txt" 2>&1 &
   pids+=($!)
   ado_ids+=("$ado_id")
 done < "$TEMP_DIR/investigation-targets.tsv"

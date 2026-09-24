@@ -49,7 +49,8 @@ directly if you want the same behavior without the wrapper.
 - `configs/`: `system.conf`, plus optional gitignored `system.local.conf` and `credentials.conf`
 - `docs/`: documentation (this guide, process summary, troubleshooting)
 - `state/`: `ado-to-github-map.json` - which ADO bugs already have a GitHub issue, or are
-  `BLOCKED` pending more information
+  `BLOCKED` pending more information / `ALREADY_FIXED`
+- `templates/`: `tracking-issue.md`, the body of every tracking issue
 - `logs/`, `temp/`: runtime output (`temp/ado-bugs.json`, per-bug `temp/log-<id>.txt`)
 - `win-scripts/`: `install.bat` and `run.bat` for launching from Windows
 

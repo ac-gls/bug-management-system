@@ -79,12 +79,14 @@ ensure_app_clone() {
     git config --global credential."https://github.com".helper "!gh auth git-credential"
   fi
 
+  # Fail rather than carry on: investigating a missing or stale checkout would produce plans
+  # against the wrong code.
   if [ ! -d "$APP_REPO_DIR/.git" ]; then
     log "Cloning $APP_REPO_URL -> $APP_REPO_DIR"
-    git clone "$APP_REPO_URL" "$APP_REPO_DIR"
+    git clone "$APP_REPO_URL" "$APP_REPO_DIR" || return 1
   else
     log "Fetching latest in $APP_REPO_DIR"
-    git -C "$APP_REPO_DIR" fetch origin
+    git -C "$APP_REPO_DIR" fetch origin || return 1
   fi
   mkdir -p "$APP_WORKTREE_DIR"
   ensure_required_agents_installed
@@ -191,15 +193,34 @@ ado_map_set() {
   jq --arg id "$id" --arg issue "$issue" '.[$id] = $issue' "$ADO_MAP_FILE" > "$tmp" && mv "$tmp" "$ADO_MAP_FILE"
 }
 
-# Marks the ADO ticket $ADO_ACTIVE_STATE when get-ado-bugs.sh collects it (confirmed valid
-# transition for this project's Bug workflow: New -> Active via Microsoft.VSTS.Actions.StartWork).
-set_ado_active() {
-  local ado_id="$1"
+# Sets the ADO ticket's State. Dry-run unless --live.
+# Args: <ado-id> <state>
+set_ado_state() {
+  local ado_id="$1" state="$2"
   if [ "$LIVE" != true ]; then
-    log "DRY RUN (pass --live to actually do this): az boards work-item update --id $ado_id --state $ADO_ACTIVE_STATE"
+    log "DRY RUN (pass --live to actually do this): az boards work-item update --id $ado_id --state $state"
     return 0
   fi
-  az boards work-item update --id "$ado_id" --organization "$ADO_ORG" --state "$ADO_ACTIVE_STATE" >/dev/null
+  az boards work-item update --id "$ado_id" --organization "$ADO_ORG" --state "$state" >/dev/null
+}
+
+# Marks the ADO ticket $ADO_ACTIVE_STATE when get-ado-bugs.sh collects it (confirmed valid
+# transition for this project's Bug workflow: New -> Active via Microsoft.VSTS.Actions.StartWork).
+set_ado_active() { set_ado_state "$1" "$ADO_ACTIVE_STATE"; }
+
+# Returns a collected bug that did not finish to $ADO_NEW_STATE, so the next run picks it up
+# again - only $ADO_NEW_STATE bugs are collected, so without this a failed bug would sit in
+# $ADO_ACTIVE_STATE forever, never retried. (Active -> New is a valid transition in this
+# project's Bug workflow - confirmed against the work item type's transitions.)
+# Args: <ado-id>
+return_ado_to_new() {
+  local ado_id="$1"
+  if set_ado_state "$ado_id" "$ADO_NEW_STATE"; then
+    log "[$ado_id] ADO state set back to $ADO_NEW_STATE so the next run retries it"
+  else
+    log "[$ado_id] WARNING: failed to set ADO state back to $ADO_NEW_STATE - set it by hand to have it retried"
+    return 1
+  fi
 }
 
 # Swaps $MIGRATION_TAG for <new_tag> on the ADO ticket, preserving every other tag untouched.
@@ -227,59 +248,108 @@ replace_ado_migration_tag() {
   az boards work-item update --id "$ado_id" --organization "$ADO_ORG" --fields "System.Tags=$joined" >/dev/null
 }
 
-# Posts a comment on the ADO ticket saying more information is required, using the
-# BLOCKER FOUND content bcx-bug-rca-agent wrote instead of a resolution plan. No GitHub issue
-# is created for this bug. Swaps its ADO tag from $MIGRATION_TAG to $BLOCKED_TAG
-# (so it naturally drops out of future WIQL queries filtered on $MIGRATION_TAG) and also marks
-# it "BLOCKED" in state/ado-to-github-map.json as a redundant safety net in case the tag write
-# itself fails. Clear both the tag and the state entry once the ticket has enough information
-# to retry.
-# Args: <ado-id> <report-file>
-post_ado_blocker_comment() {
-  local ado_id="$1" report_file="$2"
-  local blocker_detail
-  blocker_detail=$(cat "$report_file")
+# Outcomes where the agent's report replaces a resolution plan, so no GitHub issue is created:
+# the report is posted as an ADO comment under <intro>, the ticket's tag is swapped from
+# $MIGRATION_TAG to <tag> (so it naturally drops out of future WIQL queries filtered on
+# $MIGRATION_TAG), and it's recorded as <map-value> in state/ado-to-github-map.json as a
+# redundant safety net in case the tag write itself fails. Clear both to have it retried.
+# Args: <ado-id> <report-file> <intro> <tag> <map-value>
+post_ado_outcome_comment() {
+  local ado_id="$1" report_file="$2" intro="$3" tag="$4" map_value="$5"
+  local detail
+  detail=$(cat "$report_file")
 
   if [ "$LIVE" != true ]; then
-    log "DRY RUN (pass --live to actually do this): az boards work-item update --id $ado_id --discussion '<blocker detail>'"
-    echo "----- blocker comment preview for ADO-#$ado_id -----"
-    echo "$blocker_detail"
-    echo "------------------------------------------------------"
+    log "DRY RUN (pass --live to actually do this): az boards work-item update --id $ado_id --discussion '<report>' and tag $tag"
+    echo "----- ADO comment preview for ADO-#$ado_id -----"
+    echo "$intro"
+    echo
+    echo "$detail"
+    echo "-------------------------------------------------"
     return 0
   fi
 
   az boards work-item update --id "$ado_id" --organization "$ADO_ORG" \
-    --discussion "More information is required before this bug can be investigated further.
+    --discussion "$intro
 
-$blocker_detail" >/dev/null
+$detail" >/dev/null
 
-  replace_ado_migration_tag "$ado_id" "$BLOCKED_TAG"
-  ado_map_set "$ado_id" "BLOCKED"
+  replace_ado_migration_tag "$ado_id" "$tag"
+  ado_map_set "$ado_id" "$map_value"
 }
 
-# Creates the GitHub tracking issue FROM a completed RCA report (its body IS the resolution
-# plan, not a copy of the ADO ticket) - matches bcx-bug-rca-agent's own Step 4 convention
-# (title "$GITHUB_ISSUE_TITLE_PREFIX<title>", body = the report). Records the ADO id -> issue mapping, comments
-# back on the ADO ticket, and swaps its tag from $MIGRATION_TAG to $MIGRATED_TAG. Respects
-# --live/dry-run: prints a preview and returns without creating anything real when not --live.
-# Args: <ado-id> <bug-title> <ado-url> <report-file>
+# The agent hit its own Step 0 "BLOCKER FOUND" case - not enough information to investigate.
+# Args: <ado-id> <report-file>
+post_ado_blocker_comment() {
+  post_ado_outcome_comment "$1" "$2" \
+    "More information is required before this bug can be investigated further." \
+    "$BLOCKED_TAG" "BLOCKED"
+}
+
+# The agent found the bug already fixed in the investigated code - nothing to implement.
+# Args: <ado-id> <report-file> <investigated-commit>
+post_ado_already_fixed_comment() {
+  post_ado_outcome_comment "$1" "$2" \
+    "Investigation found this bug is already fixed in origin/$BASE_BRANCH @ $3 - no GitHub issue was created." \
+    "$ALREADY_FIXED_TAG" "ALREADY_FIXED"
+}
+
+# Prints each of REQUIRED_REPORT_SECTIONS that <report-file> has no Markdown heading for, one
+# per line (nothing when complete). Headings match case-insensitively at any level.
+# Args: <report-file>
+report_missing_sections() {
+  local report_file="$1" section
+  for section in "${REQUIRED_REPORT_SECTIONS[@]}"; do
+    grep -qiE "^#{1,6}[[:space:]]+(\*\*)?${section}" "$report_file" || echo "$section"
+  done
+}
+
+# Fills TRACKING_ISSUE_TEMPLATE's placeholders and prints the issue body.
+# Args: <report-file> <ado-id> <ado-url> <ado-title> <commit>
+render_tracking_issue_body() {
+  local report_file="$1" ado_id="$2" ado_url="$3" ado_title="$4" commit="$5"
+  local body report
+  body=$(cat "$TRACKING_ISSUE_TEMPLATE") || return 1
+  report=$(cat "$report_file")
+  # bash 5.2+ treats '&' in a ${var//pattern/replacement} replacement as "the matched text",
+  # which would corrupt any report containing '&&' or '&' - turn that off.
+  shopt -u patsub_replacement 2>/dev/null || true
+  body="${body//\{\{ADO_ID\}\}/$ado_id}"
+  body="${body//\{\{ADO_URL\}\}/$ado_url}"
+  body="${body//\{\{ADO_TITLE\}\}/$ado_title}"
+  body="${body//\{\{BASE_BRANCH\}\}/$BASE_BRANCH}"
+  body="${body//\{\{COMMIT\}\}/$commit}"
+  # Last, so placeholder-like text inside the report itself is left untouched.
+  body="${body//\{\{REPORT\}\}/$report}"
+  printf '%s\n' "$body"
+}
+
+# Creates the GitHub tracking issue FROM a completed RCA report (its body IS the root cause
+# analysis and resolution plan, not a copy of the ADO ticket), rendered through
+# TRACKING_ISSUE_TEMPLATE, titled "$GITHUB_ISSUE_TITLE_PREFIX<title>". Records the ADO id ->
+# issue mapping, comments back on the ADO ticket, and swaps its tag from $MIGRATION_TAG to
+# $MIGRATED_TAG. Respects --live/dry-run: prints a preview and returns without creating
+# anything real when not --live.
+# Args: <ado-id> <bug-title> <ado-url> <report-file> <investigated-commit>
 # Prints the new issue number on success (live only).
 create_tracking_issue() {
-  local ado_id="$1" title="$2" ado_url="$3" report_file="$4"
+  local ado_id="$1" title="$2" ado_url="$3" report_file="$4" commit="$5"
   local issue_title="${GITHUB_ISSUE_TITLE_PREFIX}${title}"
   local body
-  body=$(cat "$report_file")
-  body="${body}
+  if ! body=$(render_tracking_issue_body "$report_file" "$ado_id" "$ado_url" "$title" "$commit"); then
+    echo "create_tracking_issue: could not read template $TRACKING_ISSUE_TEMPLATE" >&2
+    return 1
+  fi
 
----
-ADO-#${ado_id}
-${ado_url}"
-
+  # stdout is reserved for the issue number (callers capture it) - the dry-run preview goes to
+  # stderr so it reaches the bug's log instead of vanishing into that capture.
   if [ "$LIVE" != true ]; then
-    log "DRY RUN (pass --live to actually do this): gh issue create --repo $GITHUB_ORG/$GITHUB_REPO --title '$issue_title' --type $GITHUB_ISSUE_TYPE --label $GITHUB_ISSUE_LABEL"
-    echo "----- tracking issue body preview for ADO-#$ado_id -----"
-    echo "$body"
-    echo "----------------------------------------------------------"
+    {
+      log "DRY RUN (pass --live to actually do this): gh issue create --repo $GITHUB_ORG/$GITHUB_REPO --title '$issue_title' --type $GITHUB_ISSUE_TYPE --label $GITHUB_ISSUE_LABEL"
+      echo "----- tracking issue body preview for ADO-#$ado_id -----"
+      echo "$body"
+      echo "----------------------------------------------------------"
+    } >&2
     return 0
   fi
 
