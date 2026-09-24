@@ -180,6 +180,32 @@ ensure_shared_readonly_worktree() {
   echo "$path"
 }
 
+# Runs a command holding an exclusive lock on $STATE_DIR/<name>.lock, so the parallel
+# investigation jobs never run it concurrently.
+# Args: <lock-name> <command...>
+with_lock() {
+  local name="$1"; shift
+  ( flock -x 200; "$@" ) 200>"$STATE_DIR/$name.lock"
+}
+
+# Runs an `az` command serialized across parallel jobs and retried, printing its stdout.
+# Concurrent az invocations share one ~/.azure token cache and config, and fail when they race
+# on it - the likely reason tickets from parallel runs silently missed their comment and tag
+# update. On final failure, az's error goes to stderr (the bug's log) and this returns non-zero.
+# Args: <az arguments...>
+az_retry() {
+  local attempt out err rc
+  err=$(mktemp)
+  for attempt in 1 2 3; do
+    out=$(with_lock az az "$@" 2>"$err") && { rm -f "$err"; printf '%s' "$out"; return 0; }
+    rc=$?
+    [ "$attempt" -lt 3 ] && sleep $((attempt * 3))
+  done
+  echo "az $1 $2 failed after 3 attempts (exit $rc): $(cat "$err")" >&2
+  rm -f "$err"
+  return 1
+}
+
 ADO_MAP_FILE="$STATE_DIR/ado-to-github-map.json"
 [ -f "$ADO_MAP_FILE" ] || echo '{}' > "$ADO_MAP_FILE"
 
@@ -187,11 +213,14 @@ ado_map_get() {
   jq -r --arg id "$1" '.[$id] // empty' "$ADO_MAP_FILE"
 }
 
-ado_map_set() {
+# Locked: parallel jobs finishing together would otherwise each read the map, add their own
+# entry and write it back - the last write silently dropping the others' entries.
+_ado_map_set_unlocked() {
   local id="$1" issue="$2" tmp
   tmp=$(mktemp)
   jq --arg id "$id" --arg issue "$issue" '.[$id] = $issue' "$ADO_MAP_FILE" > "$tmp" && mv "$tmp" "$ADO_MAP_FILE"
 }
+ado_map_set() { with_lock ado-map _ado_map_set_unlocked "$@"; }
 
 # Sets the ADO ticket's State. Dry-run unless --live.
 # Args: <ado-id> <state>
@@ -201,7 +230,7 @@ set_ado_state() {
     log "DRY RUN (pass --live to actually do this): az boards work-item update --id $ado_id --state $state"
     return 0
   fi
-  az boards work-item update --id "$ado_id" --organization "$ADO_ORG" --state "$state" >/dev/null
+  az_retry boards work-item update --id "$ado_id" --organization "$ADO_ORG" --state "$state" >/dev/null
 }
 
 # Marks the ADO ticket $ADO_ACTIVE_STATE when get-ado-bugs.sh collects it (confirmed valid
@@ -223,29 +252,89 @@ return_ado_to_new() {
   fi
 }
 
+# Prints a curl config line authenticating to the ADO REST API, or fails. A PAT is preferred
+# (AZURE_DEVOPS_EXT_PAT, as az devops itself uses, then ADO_PAT from credentials.conf), else an
+# access token from an `az login` session. Printed as curl config (read with `curl -K -`) so
+# the secret never appears on a command line / in the process list.
+ado_rest_auth() {
+  local pat="${AZURE_DEVOPS_EXT_PAT:-${ADO_PAT:-}}" token
+  if [ -n "$pat" ]; then
+    printf 'user = ":%s"\n' "$pat"
+    return 0
+  fi
+  # 499b84ac-... is Azure DevOps' fixed application id.
+  if token=$(az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv 2>/dev/null) && [ -n "$token" ]; then
+    printf 'header = "Authorization: Bearer %s"\n' "$token"
+    return 0
+  fi
+  echo "ado_rest_auth: no ADO credential for REST calls - set ADO_PAT in configs/credentials.conf or run az login" >&2
+  return 1
+}
+
+# Replaces the ticket's whole tag list with <tags> ("a; b; c") and prints the tags ADO now
+# reports. This can't go through `az boards work-item update --fields System.Tags=...`: that
+# sends a JSON-patch "add", which ADO treats as adding tags - it never removes any (confirmed
+# live: MigrateToGitHub survived every swap, leaving tickets with both tags). And
+# `az devops invoke` can't send the JSON-patch list a "replace" needs, so this calls the REST
+# API directly.
+# Args: <ado-id> <tags>
+ado_set_tags() {
+  local ado_id="$1" tags="$2" patch resp auth code attempt
+  patch=$(mktemp) resp=$(mktemp)
+  jq -n --arg v "$tags" '[{op: "replace", path: "/fields/System.Tags", value: $v}]' > "$patch"
+  for attempt in 1 2 3; do
+    if auth=$(ado_rest_auth); then
+      code=$(printf '%s\n' "$auth" | curl -sS -K - -o "$resp" -w '%{http_code}' -X PATCH \
+        -H "Content-Type: application/json-patch+json" --data @"$patch" \
+        "$ADO_ORG/_apis/wit/workitems/$ado_id?api-version=7.1") || code=000
+      if [ "$code" = 200 ]; then
+        jq -r '.fields."System.Tags" // ""' "$resp"
+        rm -f "$patch" "$resp"
+        return 0
+      fi
+    else
+      code=noauth
+    fi
+    [ "$attempt" -lt 3 ] && sleep $((attempt * 3))
+  done
+  echo "ado_set_tags: setting tags on $ado_id failed (HTTP $code): $(jq -r '.message // empty' "$resp" 2>/dev/null)" >&2
+  rm -f "$patch" "$resp"
+  return 1
+}
+
 # Swaps $MIGRATION_TAG for <new_tag> on the ADO ticket, preserving every other tag untouched.
-# ADO's System.Tags field has no dedicated add/remove API via `az boards` - only a full-value
-# --fields override - so this reads the current tag string, splits on the confirmed "; "
-# separator (verified live: e.g. "CORE; MigrateToGitHub"), drops $MIGRATION_TAG, appends
-# <new_tag>, and writes the whole field back.
+# Reads the current tag string, splits on the confirmed "; " separator (verified live: e.g.
+# "CORE; MigrateToGitHub"), drops $MIGRATION_TAG, appends <new_tag>, replaces the whole field
+# (ado_set_tags), and verifies the result - fails unless ADO now reports <new_tag> and not
+# $MIGRATION_TAG.
 replace_ado_migration_tag() {
   local ado_id="$1" new_tag="$2"
   if [ "$LIVE" != true ]; then
-    log "DRY RUN (pass --live to actually do this): az boards work-item update --id $ado_id --fields 'System.Tags=...; $new_tag' (removing $MIGRATION_TAG)"
+    log "DRY RUN (pass --live to actually do this): replace tags on $ado_id: remove $MIGRATION_TAG, add $new_tag"
     return 0
   fi
-  local current_tags joined tag
-  current_tags=$(az boards work-item show --id "$ado_id" --organization "$ADO_ORG" -o json | jq -r '.fields."System.Tags" // ""')
+  local current_tags joined tag item
+  # Must not continue on a failed read: an empty tag list here would overwrite every other tag
+  # on the ticket with just <new_tag>.
+  item=$(az_retry boards work-item show --id "$ado_id" --organization "$ADO_ORG" -o json) || return 1
+  current_tags=$(jq -r '.fields."System.Tags" // ""' <<< "$item") || return 1
   joined=""
   local IFS=';'
   for tag in $current_tags; do
     tag=$(echo "$tag" | xargs)
     [ -z "$tag" ] && continue
     [ "$tag" = "$MIGRATION_TAG" ] && continue
+    [ "$tag" = "$new_tag" ] && continue
     if [ -z "$joined" ]; then joined="$tag"; else joined="$joined; $tag"; fi
   done
   if [ -z "$joined" ]; then joined="$new_tag"; else joined="$joined; $new_tag"; fi
-  az boards work-item update --id "$ado_id" --organization "$ADO_ORG" --fields "System.Tags=$joined" >/dev/null
+  unset IFS
+  local result
+  result=$(ado_set_tags "$ado_id" "$joined") || return 1
+  if ! grep -qE "(^|; )${new_tag}(;|$)" <<< "$result" || grep -qE "(^|; )${MIGRATION_TAG}(;|$)" <<< "$result"; then
+    echo "replace_ado_migration_tag: $ado_id tags are '$result' after update - expected $new_tag without $MIGRATION_TAG" >&2
+    return 1
+  fi
 }
 
 # Outcomes where the agent's report replaces a resolution plan, so no GitHub issue is created:
@@ -253,6 +342,9 @@ replace_ado_migration_tag() {
 # $MIGRATION_TAG to <tag> (so it naturally drops out of future WIQL queries filtered on
 # $MIGRATION_TAG), and it's recorded as <map-value> in state/ado-to-github-map.json as a
 # redundant safety net in case the tag write itself fails. Clear both to have it retried.
+# Returns 0 when fully done, 1 when the comment couldn't be posted (nothing recorded), and 3
+# when the comment was posted but the tag update failed (recorded; scripts/repair-ado.sh
+# re-applies the tag).
 # Args: <ado-id> <report-file> <intro> <tag> <map-value>
 post_ado_outcome_comment() {
   local ado_id="$1" report_file="$2" intro="$3" tag="$4" map_value="$5"
@@ -269,13 +361,18 @@ post_ado_outcome_comment() {
     return 0
   fi
 
-  az boards work-item update --id "$ado_id" --organization "$ADO_ORG" \
+  # The comment is the whole point of this outcome - if it can't be posted, report failure so
+  # the caller returns the bug to New and it's retried, rather than recording it as done.
+  az_retry boards work-item update --id "$ado_id" --organization "$ADO_ORG" \
     --discussion "$intro
 
-$detail" >/dev/null
+$detail" >/dev/null || return 1
 
-  replace_ado_migration_tag "$ado_id" "$tag"
   ado_map_set "$ado_id" "$map_value"
+  if ! replace_ado_migration_tag "$ado_id" "$tag"; then
+    echo "post_ado_outcome_comment: comment posted but tag update to $tag failed - run scripts/repair-ado.sh --live" >&2
+    return 3
+  fi
 }
 
 # The agent hit its own Step 0 "BLOCKER FOUND" case - not enough information to investigate.
@@ -331,7 +428,9 @@ render_tracking_issue_body() {
 # $MIGRATED_TAG. Respects --live/dry-run: prints a preview and returns without creating
 # anything real when not --live.
 # Args: <ado-id> <bug-title> <ado-url> <report-file> <investigated-commit>
-# Prints the new issue number on success (live only).
+# Prints the new issue number (live only). Returns 0 when fully done, 3 when the issue was
+# created but a follow-up step (ADO comment, ADO tag, project board) failed - the failures are
+# logged and scripts/repair-ado.sh fixes them - and 1 when no issue was created.
 create_tracking_issue() {
   local ado_id="$1" title="$2" ado_url="$3" report_file="$4" commit="$5"
   local issue_title="${GITHUB_ISSUE_TITLE_PREFIX}${title}"
@@ -361,20 +460,28 @@ create_tracking_issue() {
     return 1
   fi
 
+  # The issue exists from here on - record it first, so a failure below can never lead to a
+  # duplicate issue being created on a later run.
   ado_map_set "$ado_id" "$issue_number"
-  az boards work-item update --id "$ado_id" --organization "$ADO_ORG" \
-    --discussion "RCA complete - tracking issue created: #$issue_number ($issue_url)" >/dev/null
-  replace_ado_migration_tag "$ado_id" "$MIGRATED_TAG"
 
-  set_tracking_issue_project_fields "$issue_number" "$ado_id"
+  local failed=()
+  az_retry boards work-item update --id "$ado_id" --organization "$ADO_ORG" \
+    --discussion "RCA complete - tracking issue created: #$issue_number ($issue_url)" >/dev/null \
+    || failed+=("ADO comment")
+  replace_ado_migration_tag "$ado_id" "$MIGRATED_TAG" || failed+=("ADO tag")
+  set_tracking_issue_project_fields "$issue_number" "$ado_id" || failed+=("project board")
 
   echo "$issue_number"
+  if [ ${#failed[@]} -gt 0 ]; then
+    local IFS=,
+    echo "create_tracking_issue: issue #$issue_number created, but these follow-up steps failed: ${failed[*]} - run scripts/repair-ado.sh --live" >&2
+    return 3
+  fi
 }
 
 # Adds the tracking issue to the "boostCX Delivery" org project and sets its ADO Linked
-# Tickets field (bare ADO work item id, e.g. "145237"). Best-effort - logs and continues past
-# a GraphQL error rather than failing the whole tracking-issue creation over a projects-board
-# field.
+# Tickets field (bare ADO work item id, e.g. "145237"). Returns non-zero on failure (logged);
+# create_tracking_issue reports that as a partial success rather than failing the whole issue.
 set_tracking_issue_project_fields() {
   local issue_number="$1" ado_id="$2"
   local content_id
@@ -390,13 +497,17 @@ set_tracking_issue_project_fields() {
       addProjectV2ItemById(input: {projectId: $project, contentId: $content}) { item { id } }
     }' -f project="$BOOSTCX_DELIVERY_PROJECT_ID" -f content="$content_id" \
     -q '.data.addProjectV2ItemById.item.id' 2>&1)
-  if [ -n "$item_id" ] && [[ "$item_id" != *error* ]]; then
-    gh api graphql -f query='
+  if [ -z "$item_id" ] || [[ "$item_id" == *error* ]]; then
+    echo "set_tracking_issue_project_fields: failed to add issue #$issue_number to boostCX Delivery project: $item_id" >&2
+    return 1
+  fi
+  local out
+  if ! out=$(gh api graphql -f query='
       mutation($project: ID!, $item: ID!, $field: ID!, $value: String!) {
         updateProjectV2ItemFieldValue(input: {projectId: $project, itemId: $item, fieldId: $field, value: {text: $value}}) { projectV2Item { id } }
       }' -f project="$BOOSTCX_DELIVERY_PROJECT_ID" -f item="$item_id" \
-      -f field="$BOOSTCX_DELIVERY_ADO_FIELD_ID" -f value="${ado_id}" >/dev/null 2>&1
-  else
-    echo "set_tracking_issue_project_fields: failed to add issue #$issue_number to boostCX Delivery project: $item_id" >&2
+      -f field="$BOOSTCX_DELIVERY_ADO_FIELD_ID" -f value="${ado_id}" 2>&1); then
+    echo "set_tracking_issue_project_fields: added issue #$issue_number to the project but failed to set its ADO field: $out" >&2
+    return 1
   fi
 }

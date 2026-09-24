@@ -111,6 +111,9 @@ by hand - gitignored, sourced after `system.conf`) instead of editing the tracke
 ./scripts/run-full-process.sh --limit 5 --live
 ```
 
+If a run reports `issue-partial` or a failed ADO tag update, `./scripts/repair-ado.sh --live`
+completes the missing ADO comment / tag / project-board steps (dry run without `--live`).
+
 Individual steps (each script's header comment documents its exact behavior): `get-ado-bugs.sh`,
 `start-parallel-investigation.sh` (creates the tracking issue itself, via
 `create_tracking_issue()` in `scripts/lib/common.sh`), `test-bug-migration.sh` (verifies issues

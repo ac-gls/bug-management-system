@@ -290,6 +290,20 @@ run_checks() {
     fail "Azure DevOps not reachable/logged in (run scripts/authenticate.sh)"
   fi
 
+  # Tag updates call the ADO REST API directly (az can't remove tags), which needs a PAT or an
+  # `az login` token - an `az devops login` PAT stored only in az's keyring isn't reachable.
+  local ado_pat="${AZURE_DEVOPS_EXT_PAT:-}"
+  if [ -z "$ado_pat" ] && [ -f "$CONFIGS_DIR/credentials.conf" ]; then
+    ado_pat=$(ADO_PAT="" bash -c 'source "$1" && printf "%s" "${ADO_PAT:-}"' _ "$CONFIGS_DIR/credentials.conf")
+  fi
+  if [ -n "$ado_pat" ]; then
+    pass "ADO REST credential available (PAT)"
+  elif have az && az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 -o none >/dev/null 2>&1; then
+    pass "ADO REST credential available (az login)"
+  else
+    fail "no ADO credential for tag updates - set ADO_PAT in configs/credentials.conf, or run: az login --allow-no-subscriptions"
+  fi
+
   if have claude && claude auth status 2>/dev/null | jq -e '.loggedIn == true' >/dev/null 2>&1; then
     pass "Claude Code logged in"
   else

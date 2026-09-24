@@ -59,6 +59,21 @@ created - an incomplete plan can't be implemented from later. The report is kept
 automatically, so the next run retries it - or adjust `REQUIRED_REPORT_SECTIONS` in
 `configs/system.local.conf` if the required set is wrong.
 
+### A bug shows `issue-partial`, or "ADO tag update FAILED"
+
+The tracking issue (or the blocker/already-fixed comment) was created, but a follow-up step -
+the ADO comment, the ADO tag swap, or adding the issue to the project board - failed; the bug's
+log names which and why. Nothing is lost: run
+
+```bash
+./scripts/repair-ado.sh            # reports what's missing for every processed bug
+./scripts/repair-ado.sh --live     # fixes it (only the missing pieces)
+./scripts/repair-ado.sh --live 145658   # or just specific bugs
+```
+
+It checks every bug in `state/ado-to-github-map.json` against ADO and GitHub. The project-board
+check needs the gh login's `project` scope (`./scripts/authenticate.sh` adds it).
+
 ### A failed bug is still `Active` in ADO
 
 Failed and unfinished bugs are returned to `New` automatically. If that write itself fails, the

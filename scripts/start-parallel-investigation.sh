@@ -101,7 +101,7 @@ return_unfinished_bugs() {
   local ado_id
   for ado_id in "${run_ado_ids[@]}"; do
     case "$(get_bug_status "$ado_id")" in
-      issue-created\|*|blocked\|*|already-fixed\|*|dry-run\|*|failed\|*) ;;  # finished, or fail_bug already returned it
+      issue-created\|*|issue-partial\|*|blocked\|*|already-fixed\|*|dry-run\|*|failed\|*) ;;  # finished, or fail_bug already returned it
       *) log "[$ado_id] Run ended before this bug finished"; return_ado_to_new "$ado_id" ;;
     esac
   done
@@ -226,21 +226,40 @@ investigate_one() {
 
   herdr_close_workspace "$ws"
 
-  if [ "$outcome" = blocker ]; then
-    log "[$ado_id] Agent hit a blocker - no tracking issue will be created"
-    post_ado_blocker_comment "$ado_id" "$report_file"
-    set_bug_status "$ado_id" blocked "needs more info"
-    return 0
-  fi
-  if [ "$outcome" = already-fixed ]; then
-    log "[$ado_id] Agent found the bug already fixed - no tracking issue will be created"
-    post_ado_already_fixed_comment "$ado_id" "$report_file" "$commit"
-    set_bug_status "$ado_id" already-fixed "commented on ADO"
+  # ADO-comment outcomes: 0 = done, 3 = comment posted but tag update failed (recorded - the
+  # repair script re-applies the tag), anything else = the comment itself failed, so the
+  # outcome never reached ADO and the bug is returned to New to be retried.
+  local rc
+  if [ "$outcome" = blocker ] || [ "$outcome" = already-fixed ]; then
+    local status detail
+    if [ "$outcome" = blocker ]; then
+      log "[$ado_id] Agent hit a blocker - no tracking issue will be created"
+      post_ado_blocker_comment "$ado_id" "$report_file"; rc=$?
+      status=blocked detail="needs more info"
+    else
+      log "[$ado_id] Agent found the bug already fixed - no tracking issue will be created"
+      post_ado_already_fixed_comment "$ado_id" "$report_file" "$commit"; rc=$?
+      status=already-fixed detail="commented on ADO"
+    fi
+    case "$rc" in
+      0) set_bug_status "$ado_id" "$status" "$detail" ;;
+      3) set_bug_status "$ado_id" "$status" "$detail; ADO tag update FAILED - run scripts/repair-ado.sh --live" ;;
+      *) log "[$ado_id] Posting the ADO comment failed - see above. Report kept at $report_file"
+         fail_bug "$ado_id" "ADO comment failed, see log-$ado_id.txt"
+         return 1 ;;
+    esac
     return 0
   fi
 
   local issue_number
-  if ! issue_number=$(create_tracking_issue "$ado_id" "$title" "$ado_url" "$report_file" "$commit"); then
+  issue_number=$(create_tracking_issue "$ado_id" "$title" "$ado_url" "$report_file" "$commit"); rc=$?
+  if [ "$rc" -eq 3 ]; then
+    # The issue exists - never return this bug to New (that would investigate it again).
+    log "[$ado_id] Tracking issue created: #$issue_number, but some follow-up steps failed - see above"
+    set_bug_status "$ado_id" issue-partial "#$issue_number; follow-up FAILED - run scripts/repair-ado.sh --live"
+    return 0
+  fi
+  if [ "$rc" -ne 0 ]; then
     log "[$ado_id] Creating the tracking issue failed - see above. Report kept at $report_file"
     fail_bug "$ado_id" "issue creation failed, see log-$ado_id.txt"
     return 1
