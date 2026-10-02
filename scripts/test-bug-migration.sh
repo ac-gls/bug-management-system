@@ -19,7 +19,7 @@ else
   stale_worktrees=0
 fi
 if [ "$stale_worktrees" -gt 0 ]; then
-  log "WARNING: $stale_worktrees leftover shared investigation worktree(s) found - a prior run likely crashed before cleanup"
+  log "WARNING: $stale_worktrees leftover shared investigation worktree(s) found - a prior run crashed before cleanup, or kept it for panes left open for inspection (the next run reuses it)"
 else
   log "No leftover shared investigation worktree found."
 fi

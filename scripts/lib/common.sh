@@ -148,6 +148,27 @@ remove_worktree() {
   git -C "$APP_REPO_DIR" worktree remove --force "$path" 2>/dev/null || true
 }
 
+# True only if <path> is itself the top level of a git checkout - a plain `git -C` check
+# alone would also pass for any directory nested inside some other repo.
+is_worktree_root() {
+  local top
+  [ -e "$1/.git" ] || return 1
+  top=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ "$(realpath "$top")" = "$(realpath "$1")" ]
+}
+
+# Moves any RESOLUTION-PLAN-<id>.md files out of <dir> into $TEMP_DIR as
+# late-RESOLUTION-PLAN-<id>-<timestamp>.md, so a human can review them.
+salvage_late_reports() {
+  local dir="$1" f dest
+  for f in "$dir"/RESOLUTION-PLAN-*.md; do
+    [ -f "$f" ] || continue
+    dest="$TEMP_DIR/late-$(basename "$f" .md)-$(date +%Y%m%d%H%M%S).md"
+    mv "$f" "$dest"
+    log "Found a report written after its run finished: saved to $dest (not turned into an issue - review it manually)" >&2
+  done
+}
+
 # Creates (or reuses) ONE shared, read-only worktree checked out directly on origin/<base> in
 # a detached HEAD - no new branch, since nothing is ever committed here. Used by
 # start-parallel-investigation.sh: bcx-bug-rca-agent never writes code (see
@@ -161,8 +182,23 @@ ensure_shared_readonly_worktree() {
   local name="$1" base="${2:-$BASE_BRANCH}"
   local path="$APP_WORKTREE_DIR/$name"
   if [ -d "$path" ]; then
-    # Leftover from an earlier crashed run - re-point it at the latest fetched commit rather
-    # than trusting whatever it happened to be checked out at.
+    # Any report there was written after its run stopped watching (e.g. an agent left open
+    # for inspection that resumed after a usage-limit pause). Save it so the work isn't lost;
+    # it is never turned into an issue automatically.
+    salvage_late_reports "$path"
+  fi
+  if [ -d "$path" ] && ! is_worktree_root "$path"; then
+    # Not a worktree, even though the directory exists. Confirmed in practice: the run removed
+    # the worktree, then a still-running agent wrote its report into the deleted path, which
+    # brought it back as a plain directory. `git -C` on it then searches the parent
+    # directories and fails with "not a git repository".
+    echo "ensure_shared_readonly_worktree: $path exists but is not a git worktree - removing it and creating a fresh one" >&2
+    rm -rf "$path"
+    git -C "$APP_REPO_DIR" worktree prune >&2
+  fi
+  if [ -d "$path" ]; then
+    # Left by an earlier run (crashed, or kept for open panes) - re-point it at the latest
+    # fetched commit rather than trusting whatever it happened to be checked out at.
     git -C "$path" checkout --detach "origin/$base" >&2 || return 1
     echo "$path"
     return 0

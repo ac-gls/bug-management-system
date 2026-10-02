@@ -10,7 +10,8 @@
 # in scripts/lib/common.sh) instead of each getting its own. It exists only to isolate this
 # run's code snapshot from whatever else is happening in $APP_REPO_DIR (a concurrent fixing
 # pass, your own separate work in another app) - it is removed once every bug in this run has
-# finished investigating, not kept around between runs. Each bug still gets its own herdr
+# finished investigating, unless a pane was left open for inspection (its agent may still
+# write there). In that case the next run reuses it. Each bug still gets its own herdr
 # pane/agent process; they just all read the same directory.
 #
 # The ADO ticket's State is already $ADO_ACTIVE_STATE by this point - get-ado-bugs.sh sets it when the
@@ -96,6 +97,11 @@ mapfile -t run_ado_ids < <(jq -r '.[].id' "$ADO_BUGS_FILE")
 # Status files persist in $TEMP_DIR between runs - clear this run's, or an abort would read a
 # previous run's final status and skip returning the bug.
 for ado_id in "${run_ado_ids[@]}"; do rm -f "$TEMP_DIR/status-$ado_id.status"; done
+# Set by the first bug whose agent hits a Claude usage limit. The limit applies to the whole
+# account, so any bug that hasn't started yet is failed straight away instead of starting an
+# agent that would only hit the same limit.
+USAGE_LIMIT_FLAG="$TEMP_DIR/usage-limited.flag"
+rm -f "$USAGE_LIMIT_FLAG"
 
 return_unfinished_bugs() {
   local ado_id
@@ -146,6 +152,12 @@ investigate_one() {
   local ado_id="$1" title="$2" ado_url="$3" worktree_path="$4" commit="$5"
   local name="rca-$ado_id"
 
+  if [ -f "$USAGE_LIMIT_FLAG" ]; then
+    log "[$ado_id] Not started - another bug in this run hit the Claude usage limit"
+    fail_bug "$ado_id" "not started, usage limit reached earlier in this run"
+    return 1
+  fi
+
   set_bug_status "$ado_id" starting "opening pane"
 
   local ws pane
@@ -174,13 +186,29 @@ investigate_one() {
 
   log "[$ado_id] Prompting agent $name..."
   set_bug_status "$ado_id" investigating "agent running"
-  if ! herdr_prompt_and_wait "$name" "$prompt" "$HERDR_AGENT_TIMEOUT_MS"; then
-    log "[$ado_id] Agent did not settle in time - leaving pane open for manual inspection (workspace $ws)"
+  local settled=true
+  herdr_prompt_and_wait "$name" "$prompt" "$HERDR_AGENT_TIMEOUT_MS" || settled=false
+
+  local report_file="$TEMP_DIR/rca-$ado_id.md"
+  if [ ! -f "$worktree_path/$report_filename" ] && herdr_usage_limited "$name"; then
+    # A limited agent looks settled, but Claude Code resumes it by itself once the limit
+    # resets - possibly hours after this run has finished, writing into a worktree that no
+    # longer exists. Close the workspace, which ends the agent, so that can't happen.
+    log "[$ado_id] Agent hit the Claude usage limit - closing its workspace so it can't resume after this run. Pane output saved to rca-$ado_id-raw-capture.log."
+    herdr_capture "$name" 500 > "$TEMP_DIR/rca-$ado_id-raw-capture.log"
+    herdr_close_workspace "$ws"
+    touch "$USAGE_LIMIT_FLAG"
+    fail_bug "$ado_id" "usage limit reached, agent closed"
+    return 1
+  fi
+
+  if [ "$settled" != true ]; then
+    log "[$ado_id] Agent did not settle in time - interrupting it and leaving pane open for manual inspection (workspace $ws)"
+    herdr_interrupt "$name"
     fail_bug "$ado_id" "timeout, pane left open (workspace $ws)"
     return 1
   fi
 
-  local report_file="$TEMP_DIR/rca-$ado_id.md"
   if [ ! -f "$worktree_path/$report_filename" ]; then
     # Do NOT fall back to raw pane capture and create a tracking issue from it - a stalled or
     # short-circuited agent conversation can "settle" without ever producing real content
@@ -190,6 +218,8 @@ investigate_one() {
     # to actually look at rather than guessing.
     log "[$ado_id] Agent settled but did not write $report_filename - not creating a tracking issue from unverified content. Leaving pane open for manual inspection (workspace $ws)."
     herdr_capture "$name" 500 > "$TEMP_DIR/rca-$ado_id-raw-capture.log"
+    # Stop it from carrying on (e.g. a pending automatic continuation) after the run ends.
+    herdr_interrupt "$name"
     fail_bug "$ado_id" "no report file, pane left open (workspace $ws)"
     return 1
   fi
@@ -306,8 +336,10 @@ for pid in "${pids[@]}"; do
 done
 
 log "Investigation pass complete ($failures failure(s))"
+open_panes=0
 for ado_id in "${ado_ids[@]}"; do
   status_line=$(get_bug_status "$ado_id")
+  case "$status_line" in *"pane left open"*) open_panes=$((open_panes + 1)) ;; esac
   case "${status_line%%|*}" in
     # A live-created issue is fully reviewable on GitHub - nothing further to point at here.
     # Everything else (dry-run preview, blocker, failure) has its real content only in the
@@ -317,5 +349,17 @@ for ado_id in "${ado_ids[@]}"; do
   esac
 done
 
-log "Removing shared worktree $shared_worktree_path"
-remove_worktree "$shared_worktree_path"
+# A pane left open for inspection may still have a live agent in it. Confirmed in practice: an
+# agent paused by a usage limit looked settled, then Claude Code resumed it hours later and it
+# wrote its report into the deleted worktree path. That recreated the path as a plain
+# directory and broke the next run. Keep the worktree while any pane is open. The next run
+# reuses it and saves any late report (see ensure_shared_readonly_worktree).
+if [ "$open_panes" -gt 0 ]; then
+  log "Keeping shared worktree $shared_worktree_path - $open_panes pane(s) left open for inspection may still be writing to it. The next run reuses it; close those herdr workspaces when done."
+else
+  log "Removing shared worktree $shared_worktree_path"
+  remove_worktree "$shared_worktree_path"
+  if [ -d "$shared_worktree_path" ]; then
+    log "WARNING: $shared_worktree_path still exists after removal - the next run will clear it"
+  fi
+fi

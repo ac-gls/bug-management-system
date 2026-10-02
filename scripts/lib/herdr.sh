@@ -170,6 +170,25 @@ herdr_prompt_and_wait() {
   fi
 }
 
+# True if the agent's pane shows a Claude Code usage-limit message (see USAGE_LIMIT_PATTERN).
+# Confirmed in practice: a limited agent looks settled to `herdr agent wait`, and its
+# rate-limit error can come from a background subagent while the main session just sits on
+# "continuing automatically at <time>".
+# Args: <agent-name>
+herdr_usage_limited() {
+  herdr_read "$1" 300 | grep -Eqi "$USAGE_LIMIT_PATTERN"
+}
+
+# Sends a single Esc to interrupt the agent's current turn and cancel any pending automatic
+# continuation, so a pane left open for inspection stops working and writing. Only one Esc:
+# a second one in quick succession opens Claude Code's rewind menu. Background subagents may
+# keep running after this, which is why the caller keeps the shared worktree while any pane
+# is left open.
+# Args: <agent-name>
+herdr_interrupt() {
+  herdr agent send-keys "$1" esc >/dev/null 2>&1 || true
+}
+
 # Prints the agent's recent terminal output (used to capture a final report).
 herdr_capture() {
   local name="$1" lines="${2:-500}"
