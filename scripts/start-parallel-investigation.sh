@@ -1,8 +1,8 @@
 #!/bin/bash
-# For each bug in $ADO_BUGS_FILE not already tracked (state/ado-to-github-map.json), starts a
-# real `claude` agent in its own herdr pane and asks it to run this repo's own
-# bcx-bug-rca-agent directly against the ADO ticket - no GitHub issue exists yet at this
-# point. The agent explicitly stops after producing a resolution plan; it never writes code
+# For each collected bug in $ADO_BUGS_FILE (new migrations or explicit rerun requests), starts
+# a real `claude` agent in its own herdr pane and asks it to run this repo's own
+# bcx-bug-rca-agent directly against the latest ADO ticket.
+# Reruns reuse a linked GitHub issue when available; normal migrations create one. The agent explicitly stops after producing a resolution plan; it never writes code
 # (see agents/bcx-bug-rca-agent.md) or commits anything.
 #
 # Because nothing is written back to the checkout, every bug investigated in this run shares
@@ -10,7 +10,8 @@
 # in scripts/lib/common.sh) instead of each getting its own. It exists only to isolate this
 # run's code snapshot from whatever else is happening in $APP_REPO_DIR (a concurrent fixing
 # pass, your own separate work in another app) - it is removed once every bug in this run has
-# finished investigating, not kept around between runs. Each bug still gets its own herdr
+# finished investigating, unless a pane was left open for inspection (its agent may still
+# write there). In that case the next run reuses it. Each bug still gets its own herdr
 # pane/agent process; they just all read the same directory.
 #
 # The ADO ticket's State is already $ADO_ACTIVE_STATE by this point - get-ado-bugs.sh sets it when the
@@ -29,8 +30,8 @@
 #     ticket stating more information is required, with the specific blocker detail, and its
 #     tag is swapped from $MIGRATION_TAG to $BLOCKED_TAG. The bug is also
 #     recorded in state/ado-to-github-map.json (as "BLOCKED") as a redundant safety net in
-#     case the tag write itself fails - clear both once the ticket has enough information to
-#     retry (re-adding the $MIGRATION_TAG tag).
+#     case the tag write itself fails. To retry, add $RERUN_REQUESTED_TAG and return the bug
+#     to $ADO_NEW_STATE; there is no need to clear the map.
 #   - The agent found the bug already fixed in the investigated code ("ALREADY FIXED" report)
 #     -> no GitHub issue is created; its evidence is posted as an ADO comment, the tag is
 #     swapped from $MIGRATION_TAG to $ALREADY_FIXED_TAG, and it's recorded as "ALREADY_FIXED"
@@ -96,6 +97,11 @@ mapfile -t run_ado_ids < <(jq -r '.[].id' "$ADO_BUGS_FILE")
 # Status files persist in $TEMP_DIR between runs - clear this run's, or an abort would read a
 # previous run's final status and skip returning the bug.
 for ado_id in "${run_ado_ids[@]}"; do rm -f "$TEMP_DIR/status-$ado_id.status"; done
+# Set by the first bug whose agent hits a Claude usage limit. The limit applies to the whole
+# account, so any bug that hasn't started yet is failed straight away instead of starting an
+# agent that would only hit the same limit.
+USAGE_LIMIT_FLAG="$TEMP_DIR/usage-limited.flag"
+rm -f "$USAGE_LIMIT_FLAG"
 
 return_unfinished_bugs() {
   local ado_id
@@ -145,6 +151,21 @@ fail_bug() {
 investigate_one() {
   local ado_id="$1" title="$2" ado_url="$3" worktree_path="$4" commit="$5"
   local name="rca-$ado_id"
+  local rerun linked_issue issue_context
+  rerun=$(jq -r --arg id "$ado_id" '.[] | select(.id == $id) | .rerun_requested // false' "$ADO_BUGS_FILE")
+  if [ "$rerun" = true ] && [ "$LIVE" = true ]; then
+    # A standalone live invocation may consume a dry-run collection, which has no ledger yet.
+    if ! prepare_ado_rerun "$ado_id" || ! set_ado_active "$ado_id"; then
+      fail_bug "$ado_id" "could not prepare/claim rerun"
+      return 1
+    fi
+  fi
+
+  if [ -f "$USAGE_LIMIT_FLAG" ]; then
+    log "[$ado_id] Not started - another bug in this run hit the Claude usage limit"
+    fail_bug "$ado_id" "not started, usage limit reached earlier in this run"
+    return 1
+  fi
 
   set_bug_status "$ado_id" starting "opening pane"
 
@@ -164,23 +185,47 @@ investigate_one() {
     return 1
   fi
 
+  linked_issue=$(ado_linked_issue "$ado_id")
+  issue_context="This investigation will create a new GitHub tracking issue."
+  if [ "$rerun" = true ]; then
+    issue_context="This is a fresh investigation requested via $RERUN_REQUESTED_TAG; use the latest ADO repro steps and evidence, not an assumption that the previous conclusion is still valid."
+    if [ -n "$linked_issue" ]; then
+      issue_context="$issue_context GitHub issue #$linked_issue is already linked; the pipeline will update and reopen it from your report."
+    fi
+  fi
   local report_filename="RESOLUTION-PLAN-$ado_id.md"
   # Clear any stale file from a previous crashed run before prompting - the shared worktree
   # can be reused across runs, and a leftover file must never be mistaken for this run's
   # output.
   rm -f "$worktree_path/$report_filename"
 
-  local prompt="Use the $RCA_AGENT_NAME to investigate ADO ticket $ado_id (organization $ADO_ORG, project \"$ADO_PROJECT\") in $GITHUB_ORG/$GITHUB_REPO. There is no GitHub issue for this bug yet. Produce your resolution plan and stop - do not create a tracking issue and do not proceed to implementation; the tracking issue will be created from your report separately. This worktree is shared read-only across every bug investigated in this run and will be deleted once they all finish - do not modify, create, or commit any file except $report_filename, and skip your own Step 3.5 (Banyan Memory Bank knowledge saving) entirely since nothing written here persists. Write the complete report as clean, well-formatted Markdown to a file named $report_filename in the current directory - proper headings, code fences for file paths/snippets, no terminal chrome or box-drawing characters, nothing that isn't meant to appear as the body of a GitHub issue. Start the file with a single top-level heading, then use Markdown headings with exactly these names, in this order: $required_sections_list (your Step 3 Resolution Plan subsections go under the Resolution Plan heading). The file becomes a GitHub issue that a separate process will later implement from without re-investigating, so it must stand on its own: leave out the Bug Issue subsection (no issue exists yet), the Knowledge Saved and Reviewer Checklist sections, and any hand-off or next-step instructions - document only the analysis and the plan. When the file is written, reply in chat with just a one-line confirmation - do not repeat the report content in chat. If your own Step 0 Bug Clarity Check fails and you cannot proceed, write that same $report_filename file starting with the exact line 'BLOCKER FOUND' (all caps, nothing before it) followed by the Type/Issue/Detail/Recommendation from your blocker report - do not fabricate a resolution plan when the check fails. If instead you find the bug is already fixed in this checkout, write that same $report_filename file starting with the exact line 'ALREADY FIXED' (all caps, nothing before it) followed by the evidence: the commit(s) and code that fixed it, how you verified the fix is present, and any residual observations - do not write a resolution plan for a bug that is already fixed."
+  local prompt="Use the $RCA_AGENT_NAME to investigate ADO ticket $ado_id (organization $ADO_ORG, project \"$ADO_PROJECT\") in $GITHUB_ORG/$GITHUB_REPO. $issue_context Produce your resolution plan and stop - do not create or modify a tracking issue and do not proceed to implementation; the tracking issue will be created or updated from your report separately. This worktree is shared read-only across every bug investigated in this run and will be deleted once they all finish - do not modify, create, or commit any file except $report_filename, and skip your own Step 3.5 (Banyan Memory Bank knowledge saving) entirely since nothing written here persists. Write the complete report as clean, well-formatted Markdown to a file named $report_filename in the current directory - proper headings, code fences for file paths/snippets, no terminal chrome or box-drawing characters, nothing that isn't meant to appear as the body of a GitHub issue. Start the file with a single top-level heading, then use Markdown headings with exactly these names, in this order: $required_sections_list (your Step 3 Resolution Plan subsections go under the Resolution Plan heading). The file becomes a GitHub issue that a separate process will later implement from without re-investigating, so it must stand on its own: leave out the Bug Issue subsection (issue management is handled separately), the Knowledge Saved and Reviewer Checklist sections, and any hand-off or next-step instructions - document only the analysis and the plan. When the file is written, reply in chat with just a one-line confirmation - do not repeat the report content in chat. If your own Step 0 Bug Clarity Check fails and you cannot proceed, write that same $report_filename file starting with the exact line 'BLOCKER FOUND' (all caps, nothing before it) followed by the Type/Issue/Detail/Recommendation from your blocker report - do not fabricate a resolution plan when the check fails. If instead you find the bug is already fixed in this checkout, write that same $report_filename file starting with the exact line 'ALREADY FIXED' (all caps, nothing before it) followed by the evidence: the commit(s) and code that fixed it, how you verified the fix is present, and any residual observations - do not write a resolution plan for a bug that is already fixed."
 
   log "[$ado_id] Prompting agent $name..."
   set_bug_status "$ado_id" investigating "agent running"
-  if ! herdr_prompt_and_wait "$name" "$prompt" "$HERDR_AGENT_TIMEOUT_MS"; then
-    log "[$ado_id] Agent did not settle in time - leaving pane open for manual inspection (workspace $ws)"
+  local settled=true
+  herdr_prompt_and_wait "$name" "$prompt" "$HERDR_AGENT_TIMEOUT_MS" || settled=false
+
+  local report_file="$TEMP_DIR/rca-$ado_id.md"
+  if [ ! -f "$worktree_path/$report_filename" ] && herdr_usage_limited "$name"; then
+    # A limited agent looks settled, but Claude Code resumes it by itself once the limit
+    # resets - possibly hours after this run has finished, writing into a worktree that no
+    # longer exists. Close the workspace, which ends the agent, so that can't happen.
+    log "[$ado_id] Agent hit the Claude usage limit - closing its workspace so it can't resume after this run. Pane output saved to rca-$ado_id-raw-capture.log."
+    herdr_capture "$name" 500 > "$TEMP_DIR/rca-$ado_id-raw-capture.log"
+    herdr_close_workspace "$ws"
+    touch "$USAGE_LIMIT_FLAG"
+    fail_bug "$ado_id" "usage limit reached, agent closed"
+    return 1
+  fi
+
+  if [ "$settled" != true ]; then
+    log "[$ado_id] Agent did not settle in time - interrupting it and leaving pane open for manual inspection (workspace $ws)"
+    herdr_interrupt "$name"
     fail_bug "$ado_id" "timeout, pane left open (workspace $ws)"
     return 1
   fi
 
-  local report_file="$TEMP_DIR/rca-$ado_id.md"
   if [ ! -f "$worktree_path/$report_filename" ]; then
     # Do NOT fall back to raw pane capture and create a tracking issue from it - a stalled or
     # short-circuited agent conversation can "settle" without ever producing real content
@@ -190,6 +235,8 @@ investigate_one() {
     # to actually look at rather than guessing.
     log "[$ado_id] Agent settled but did not write $report_filename - not creating a tracking issue from unverified content. Leaving pane open for manual inspection (workspace $ws)."
     herdr_capture "$name" 500 > "$TEMP_DIR/rca-$ado_id-raw-capture.log"
+    # Stop it from carrying on (e.g. a pending automatic continuation) after the run ends.
+    herdr_interrupt "$name"
     fail_bug "$ado_id" "no report file, pane left open (workspace $ws)"
     return 1
   fi
@@ -252,20 +299,20 @@ investigate_one() {
   fi
 
   local issue_number
-  issue_number=$(create_tracking_issue "$ado_id" "$title" "$ado_url" "$report_file" "$commit"); rc=$?
+  issue_number=$(create_tracking_issue "$ado_id" "$title" "$ado_url" "$report_file" "$commit" "$rerun"); rc=$?
   if [ "$rc" -eq 3 ]; then
     # The issue exists - never return this bug to New (that would investigate it again).
-    log "[$ado_id] Tracking issue created: #$issue_number, but some follow-up steps failed - see above"
+    log "[$ado_id] Tracking issue ready: #$issue_number, but some follow-up steps failed - see above"
     set_bug_status "$ado_id" issue-partial "#$issue_number; follow-up FAILED - run scripts/repair-ado.sh --live"
     return 0
   fi
   if [ "$rc" -ne 0 ]; then
-    log "[$ado_id] Creating the tracking issue failed - see above. Report kept at $report_file"
+    log "[$ado_id] Creating/updating the tracking issue failed - see above. Report kept at $report_file"
     fail_bug "$ado_id" "issue creation failed, see log-$ado_id.txt"
     return 1
   fi
   if [ "$LIVE" = true ]; then
-    log "[$ado_id] Tracking issue created: #$issue_number"
+    log "[$ado_id] Tracking issue ready: #$issue_number"
     set_bug_status "$ado_id" issue-created "#$issue_number"
   else
     set_bug_status "$ado_id" dry-run "preview in log-$ado_id.txt"
@@ -306,8 +353,10 @@ for pid in "${pids[@]}"; do
 done
 
 log "Investigation pass complete ($failures failure(s))"
+open_panes=0
 for ado_id in "${ado_ids[@]}"; do
   status_line=$(get_bug_status "$ado_id")
+  case "$status_line" in *"pane left open"*) open_panes=$((open_panes + 1)) ;; esac
   case "${status_line%%|*}" in
     # A live-created issue is fully reviewable on GitHub - nothing further to point at here.
     # Everything else (dry-run preview, blocker, failure) has its real content only in the
@@ -317,5 +366,17 @@ for ado_id in "${ado_ids[@]}"; do
   esac
 done
 
-log "Removing shared worktree $shared_worktree_path"
-remove_worktree "$shared_worktree_path"
+# A pane left open for inspection may still have a live agent in it. Confirmed in practice: an
+# agent paused by a usage limit looked settled, then Claude Code resumed it hours later and it
+# wrote its report into the deleted worktree path. That recreated the path as a plain
+# directory and broke the next run. Keep the worktree while any pane is open. The next run
+# reuses it and saves any late report (see ensure_shared_readonly_worktree).
+if [ "$open_panes" -gt 0 ]; then
+  log "Keeping shared worktree $shared_worktree_path - $open_panes pane(s) left open for inspection may still be writing to it. The next run reuses it; close those herdr workspaces when done."
+else
+  log "Removing shared worktree $shared_worktree_path"
+  remove_worktree "$shared_worktree_path"
+  if [ -d "$shared_worktree_path" ]; then
+    log "WARNING: $shared_worktree_path still exists after removal - the next run will clear it"
+  fi
+fi

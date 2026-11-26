@@ -148,6 +148,27 @@ remove_worktree() {
   git -C "$APP_REPO_DIR" worktree remove --force "$path" 2>/dev/null || true
 }
 
+# True only if <path> is itself the top level of a git checkout - a plain `git -C` check
+# alone would also pass for any directory nested inside some other repo.
+is_worktree_root() {
+  local top
+  [ -e "$1/.git" ] || return 1
+  top=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ "$(realpath "$top")" = "$(realpath "$1")" ]
+}
+
+# Moves any RESOLUTION-PLAN-<id>.md files out of <dir> into $TEMP_DIR as
+# late-RESOLUTION-PLAN-<id>-<timestamp>.md, so a human can review them.
+salvage_late_reports() {
+  local dir="$1" f dest
+  for f in "$dir"/RESOLUTION-PLAN-*.md; do
+    [ -f "$f" ] || continue
+    dest="$TEMP_DIR/late-$(basename "$f" .md)-$(date +%Y%m%d%H%M%S).md"
+    mv "$f" "$dest"
+    log "Found a report written after its run finished: saved to $dest (not turned into an issue - review it manually)" >&2
+  done
+}
+
 # Creates (or reuses) ONE shared, read-only worktree checked out directly on origin/<base> in
 # a detached HEAD - no new branch, since nothing is ever committed here. Used by
 # start-parallel-investigation.sh: bcx-bug-rca-agent never writes code (see
@@ -161,8 +182,23 @@ ensure_shared_readonly_worktree() {
   local name="$1" base="${2:-$BASE_BRANCH}"
   local path="$APP_WORKTREE_DIR/$name"
   if [ -d "$path" ]; then
-    # Leftover from an earlier crashed run - re-point it at the latest fetched commit rather
-    # than trusting whatever it happened to be checked out at.
+    # Any report there was written after its run stopped watching (e.g. an agent left open
+    # for inspection that resumed after a usage-limit pause). Save it so the work isn't lost;
+    # it is never turned into an issue automatically.
+    salvage_late_reports "$path"
+  fi
+  if [ -d "$path" ] && ! is_worktree_root "$path"; then
+    # Not a worktree, even though the directory exists. Confirmed in practice: the run removed
+    # the worktree, then a still-running agent wrote its report into the deleted path, which
+    # brought it back as a plain directory. `git -C` on it then searches the parent
+    # directories and fails with "not a git repository".
+    echo "ensure_shared_readonly_worktree: $path exists but is not a git worktree - removing it and creating a fresh one" >&2
+    rm -rf "$path"
+    git -C "$APP_REPO_DIR" worktree prune >&2
+  fi
+  if [ -d "$path" ]; then
+    # Left by an earlier run (crashed, or kept for open panes) - re-point it at the latest
+    # fetched commit rather than trusting whatever it happened to be checked out at.
     git -C "$path" checkout --detach "origin/$base" >&2 || return 1
     echo "$path"
     return 0
@@ -206,19 +242,75 @@ az_retry() {
   return 1
 }
 
+# Exact, case-insensitive tag membership (ADO tag queries are case-insensitive too).
+has_tag() {
+  jq -ne --arg tags "$1" --arg want "$2" '
+    $tags | split(";") | any(.[]; (gsub("^\\s+|\\s+$"; "") | ascii_downcase) == ($want | ascii_downcase))' >/dev/null
+}
+
 ADO_MAP_FILE="$STATE_DIR/ado-to-github-map.json"
-[ -f "$ADO_MAP_FILE" ] || echo '{}' > "$ADO_MAP_FILE"
+ADO_RERUN_FILE="$STATE_DIR/ado-rerun-state.json"
+ADO_HISTORY_FILE="$STATE_DIR/ado-outcome-history.json"
+
+ado_rerun_get() {
+  [ -f "$ADO_RERUN_FILE" ] || { echo '{}'; return; }
+  jq -c --arg id "$1" '.[$id] // {}' "$ADO_RERUN_FILE"
+}
+
+# Retain the linked issue even if a later investigation ends BLOCKED/ALREADY_FIXED.
+ado_linked_issue() {
+  local value
+  value=$(ado_map_get "$1") || return 1
+  if [[ "$value" =~ ^[0-9]+$ ]]; then printf '%s\n' "$value"; return; fi
+  ado_rerun_get "$1" | jq -r '.issue // empty'
+}
+
+_ado_rerun_set_unlocked() {
+  local id="$1" status="$2" issue="$3" outcome="${4:-$3}" tmp source_file="$ADO_RERUN_FILE"
+  [ -f "$source_file" ] || source_file=/dev/stdin
+  tmp=$(mktemp "$STATE_DIR/rerun.XXXXXX")
+  jq --arg id "$id" --arg status "$status" --arg issue "$issue" --arg outcome "$outcome" \
+    '.[$id] = {status: $status, issue: $issue, outcome: $outcome}' "$source_file" <<< '{}' > "$tmp" \
+    && mv "$tmp" "$ADO_RERUN_FILE"
+}
+ado_rerun_set() { with_lock ado-map _ado_rerun_set_unlocked "$@"; }
+
+# Used by collection AND standalone live investigation of a dry-run collection file.
+prepare_ado_rerun() {
+  [ "$LIVE" = true ] || return 0
+  local issue
+  issue=$(ado_linked_issue "$1") || return 1
+  ado_rerun_set "$1" pending "$issue"
+}
+
+ado_rerun_complete() {
+  local record issue
+  record=$(ado_rerun_get "$1") || return 1
+  [ -n "$(jq -r '.status // empty' <<< "$record")" ] || return 0
+  issue=$(ado_linked_issue "$1") || return 1
+  ado_rerun_set "$1" completed "$issue" "${2:-$issue}"
+}
 
 ado_map_get() {
+  [ -f "$ADO_MAP_FILE" ] || return 0
   jq -r --arg id "$1" '.[$id] // empty' "$ADO_MAP_FILE"
 }
 
 # Locked: parallel jobs finishing together would otherwise each read the map, add their own
 # entry and write it back - the last write silently dropping the others' entries.
 _ado_map_set_unlocked() {
-  local id="$1" issue="$2" tmp
-  tmp=$(mktemp)
-  jq --arg id "$id" --arg issue "$issue" '.[$id] = $issue' "$ADO_MAP_FILE" > "$tmp" && mv "$tmp" "$ADO_MAP_FILE"
+  local id="$1" issue="$2" tmp history_tmp previous source_file="$ADO_HISTORY_FILE"
+  previous=$(ado_map_get "$id") || return 1
+  [ -f "$source_file" ] || source_file=/dev/stdin
+  history_tmp=$(mktemp "$STATE_DIR/history.XXXXXX")
+  jq --arg id "$id" --arg previous "$previous" --arg outcome "$issue" \
+    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '.[$id] = ((.[$id] // []) + [{at: $at, previous: $previous, outcome: $outcome}])' \
+    "$source_file" <<< '{}' > "$history_tmp" && mv "$history_tmp" "$ADO_HISTORY_FILE" || return 1
+  source_file="$ADO_MAP_FILE"
+  [ -f "$source_file" ] || source_file=/dev/stdin
+  tmp=$(mktemp "$STATE_DIR/map.XXXXXX")
+  jq --arg id "$id" --arg issue "$issue" '.[$id] = $issue' "$source_file" <<< '{}' > "$tmp" && mv "$tmp" "$ADO_MAP_FILE"
 }
 ado_map_set() { with_lock ado-map _ado_map_set_unlocked "$@"; }
 
@@ -302,15 +394,12 @@ ado_set_tags() {
   return 1
 }
 
-# Swaps $MIGRATION_TAG for <new_tag> on the ADO ticket, preserving every other tag untouched.
-# Reads the current tag string, splits on the confirmed "; " separator (verified live: e.g.
-# "CORE; MigrateToGitHub"), drops $MIGRATION_TAG, appends <new_tag>, replaces the whole field
-# (ado_set_tags), and verifies the result - fails unless ADO now reports <new_tag> and not
-# $MIGRATION_TAG.
+# Replaces request and stale outcome tags with <new_tag>, preserving unrelated tags.
+# Completion consumes ReRunRequested; failed investigations leave it in place for retry.
 replace_ado_migration_tag() {
   local ado_id="$1" new_tag="$2"
   if [ "$LIVE" != true ]; then
-    log "DRY RUN (pass --live to actually do this): replace tags on $ado_id: remove $MIGRATION_TAG, add $new_tag"
+    log "DRY RUN (pass --live to actually do this): replace request/outcome tags on $ado_id with $new_tag"
     return 0
   fi
   local current_tags joined tag item
@@ -321,27 +410,36 @@ replace_ado_migration_tag() {
   joined=""
   local IFS=';'
   for tag in $current_tags; do
-    tag=$(echo "$tag" | xargs)
+    tag=$(jq -nr --arg tag "$tag" '$tag | gsub("^\\s+|\\s+$"; "")')
     [ -z "$tag" ] && continue
-    [ "$tag" = "$MIGRATION_TAG" ] && continue
-    [ "$tag" = "$new_tag" ] && continue
+    if has_tag "$tag" "$MIGRATION_TAG" || has_tag "$tag" "$RERUN_REQUESTED_TAG" \
+      || has_tag "$tag" "$MIGRATED_TAG" || has_tag "$tag" "$BLOCKED_TAG" \
+      || has_tag "$tag" "$ALREADY_FIXED_TAG" || has_tag "$tag" "$new_tag"; then continue; fi
     if [ -z "$joined" ]; then joined="$tag"; else joined="$joined; $tag"; fi
   done
   if [ -z "$joined" ]; then joined="$new_tag"; else joined="$joined; $new_tag"; fi
   unset IFS
   local result
   result=$(ado_set_tags "$ado_id" "$joined") || return 1
-  if ! grep -qE "(^|; )${new_tag}(;|$)" <<< "$result" || grep -qE "(^|; )${MIGRATION_TAG}(;|$)" <<< "$result"; then
-    echo "replace_ado_migration_tag: $ado_id tags are '$result' after update - expected $new_tag without $MIGRATION_TAG" >&2
+  if ! has_tag "$result" "$new_tag" || has_tag "$result" "$MIGRATION_TAG" || has_tag "$result" "$RERUN_REQUESTED_TAG"; then
+    echo "replace_ado_migration_tag: $ado_id tags are '$result' after update - expected $new_tag without request tags" >&2
     return 1
   fi
+  local outcome_tag
+  for outcome_tag in "$MIGRATED_TAG" "$BLOCKED_TAG" "$ALREADY_FIXED_TAG"; do
+    if [ "$outcome_tag" != "$new_tag" ] && has_tag "$result" "$outcome_tag"; then
+      echo "replace_ado_migration_tag: $ado_id still has stale outcome tag $outcome_tag" >&2
+      return 1
+    fi
+  done
 }
 
 # Outcomes where the agent's report replaces a resolution plan, so no GitHub issue is created:
 # the report is posted as an ADO comment under <intro>, the ticket's tag is swapped from
 # $MIGRATION_TAG to <tag> (so it naturally drops out of future WIQL queries filtered on
 # $MIGRATION_TAG), and it's recorded as <map-value> in state/ado-to-github-map.json as a
-# redundant safety net in case the tag write itself fails. Clear both to have it retried.
+# redundant safety net in case the tag write itself fails. Request a rerun via the explicit
+# $RERUN_REQUESTED_TAG in $ADO_NEW_STATE, without clearing the map.
 # Returns 0 when fully done, 1 when the comment couldn't be posted (nothing recorded), and 3
 # when the comment was posted but the tag update failed (recorded; scripts/repair-ado.sh
 # re-applies the tag).
@@ -368,7 +466,10 @@ post_ado_outcome_comment() {
 
 $detail" >/dev/null || return 1
 
-  ado_map_set "$ado_id" "$map_value"
+  # Preserve the old GitHub link before replacing the latest outcome with a sentinel.
+  # A failed ledger write is retryable: leave the request and old map intact.
+  ado_rerun_complete "$ado_id" "$map_value" || return 1
+  ado_map_set "$ado_id" "$map_value" || return 3
   if ! replace_ado_migration_tag "$ado_id" "$tag"; then
     echo "post_ado_outcome_comment: comment posted but tag update to $tag failed - run scripts/repair-ado.sh --live" >&2
     return 3
@@ -427,14 +528,22 @@ render_tracking_issue_body() {
 # issue mapping, comments back on the ADO ticket, and swaps its tag from $MIGRATION_TAG to
 # $MIGRATED_TAG. Respects --live/dry-run: prints a preview and returns without creating
 # anything real when not --live.
-# Args: <ado-id> <bug-title> <ado-url> <report-file> <investigated-commit>
-# Prints the new issue number (live only). Returns 0 when fully done, 3 when the issue was
-# created but a follow-up step (ADO comment, ADO tag, project board) failed - the failures are
-# logged and scripts/repair-ado.sh fixes them - and 1 when no issue was created.
+# Args: <ado-id> <bug-title> <ado-url> <report-file> <investigated-commit> [rerun: true|false]
+# Reruns reuse the retained issue link, archive its old body in a comment, and reopen it.
+# Prints the issue number (live only). Returns 0 when fully done, 3 for a saved result needing
+# repair (ADO comment/tag, project board, issue fields or map), and 1 for a retryable failure.
+# A rerun can update GitHub before a later step fails; its saved link prevents duplicates.
 create_tracking_issue() {
-  local ado_id="$1" title="$2" ado_url="$3" report_file="$4" commit="$5"
+  local ado_id="$1" title="$2" ado_url="$3" report_file="$4" commit="$5" rerun="${6:-false}"
   local issue_title="${GITHUB_ISSUE_TITLE_PREFIX}${title}"
-  local body
+  local body linked_issue=""
+  if [ "$rerun" = true ]; then
+    linked_issue=$(ado_linked_issue "$ado_id") || return 1
+  elif [ "$LIVE" = true ] && [ "$(ado_rerun_get "$ado_id")" != '{}' ]; then
+    # A manual normal-migration reset can retain an older completion ledger. Invalidate its
+    # authority BEFORE creating another issue, so failed completion writes cannot restore it.
+    prepare_ado_rerun "$ado_id" || return 1
+  fi
   if ! body=$(render_tracking_issue_body "$report_file" "$ado_id" "$ado_url" "$title" "$commit"); then
     echo "create_tracking_issue: could not read template $TRACKING_ISSUE_TEMPLATE" >&2
     return 1
@@ -444,7 +553,11 @@ create_tracking_issue() {
   # stderr so it reaches the bug's log instead of vanishing into that capture.
   if [ "$LIVE" != true ]; then
     {
-      log "DRY RUN (pass --live to actually do this): gh issue create --repo $GITHUB_ORG/$GITHUB_REPO --title '$issue_title' --type $GITHUB_ISSUE_TYPE --label $GITHUB_ISSUE_LABEL"
+      if [ -n "$linked_issue" ]; then
+        log "DRY RUN: preserve prior report, update and reopen GitHub issue #$linked_issue"
+      else
+        log "DRY RUN (pass --live to actually do this): gh issue create --repo $GITHUB_ORG/$GITHUB_REPO --title '$issue_title' --type $GITHUB_ISSUE_TYPE --label $GITHUB_ISSUE_LABEL"
+      fi
       echo "----- tracking issue body preview for ADO-#$ado_id -----"
       echo "$body"
       echo "----------------------------------------------------------"
@@ -452,42 +565,72 @@ create_tracking_issue() {
     return 0
   fi
 
-  local issue_url issue_number
-  issue_url=$(gh issue create --repo "$GITHUB_ORG/$GITHUB_REPO" --title "$issue_title" --body "$body" --label "$GITHUB_ISSUE_LABEL" --type "$GITHUB_ISSUE_TYPE")
-  issue_number=$(echo "$issue_url" | grep -oE '[0-9]+$')
-  if [ -z "$issue_number" ]; then
-    echo "create_tracking_issue: failed to parse issue number from: $issue_url" >&2
-    return 1
+  local issue_url issue_number action=created previous
+  if [ -n "$linked_issue" ]; then
+    issue_number="$linked_issue"
+    # Never create a replacement if the linked issue is inaccessible. Retry safely instead.
+    previous=$(gh issue view "$issue_number" --repo "$GITHUB_ORG/$GITHUB_REPO" --json body,state,url) || return 1
+    issue_url=$(jq -r '.url' <<< "$previous")
+    if [ "$(jq -r '.body // ""' <<< "$previous")" != "$body" ]; then
+      gh issue comment "$issue_number" --repo "$GITHUB_ORG/$GITHUB_REPO" \
+        --body "Previous RCA / resolution plan before ADO-#$ado_id rerun:
+
+$(jq -r '.body // ""' <<< "$previous")" >/dev/null || return 1
+    fi
+    gh issue edit "$issue_number" --repo "$GITHUB_ORG/$GITHUB_REPO" --title "$issue_title" --body "$body" >/dev/null || return 1
+    if [ "$(jq -r '.state' <<< "$previous")" = CLOSED ]; then
+      gh issue reopen "$issue_number" --repo "$GITHUB_ORG/$GITHUB_REPO" >/dev/null || return 1
+    fi
+    action="updated after rerun"
+  else
+    issue_url=$(gh issue create --repo "$GITHUB_ORG/$GITHUB_REPO" --title "$issue_title" --body "$body" --label "$GITHUB_ISSUE_LABEL" --type "$GITHUB_ISSUE_TYPE") || return 1
+    issue_number=$(echo "$issue_url" | grep -oE '[0-9]+$')
+    if [ -z "$issue_number" ]; then
+      echo "create_tracking_issue: failed to parse issue number from: $issue_url" >&2
+      return 1
+    fi
   fi
 
-  # The issue exists from here on - record it first, so a failure below can never lead to a
-  # duplicate issue being created on a later run.
-  ado_map_set "$ado_id" "$issue_number"
-
+  # Persist the link before replacing a sentinel outcome or attempting ADO write-back.
   local failed=()
+  ado_map_set "$ado_id" "$issue_number" || failed+=("outcome map")
+  if { [ "$rerun" = true ] || [ "$(ado_rerun_get "$ado_id")" != '{}' ]; } \
+    && ! ado_rerun_set "$ado_id" completed "$issue_number"; then
+    echo "create_tracking_issue: issue #$issue_number updated/created but completion state could not be saved; request retained for retry" >&2
+    # With the issue mapped, an explicit rerun cannot create a duplicate. Do not consume tags.
+    if [ "$rerun" != true ]; then
+      echo "create_tracking_issue: add $RERUN_REQUESTED_TAG in $ADO_NEW_STATE to retry this manually reset migration safely" >&2
+    fi
+    if [ ${#failed[@]} -eq 0 ]; then return 1; fi
+    echo "create_tracking_issue: outcome map also failed - record issue #$issue_number manually before retrying" >&2
+    echo "$issue_number"
+    return 3
+  fi
   az_retry boards work-item update --id "$ado_id" --organization "$ADO_ORG" \
-    --discussion "RCA complete - tracking issue created: #$issue_number ($issue_url)" >/dev/null \
+    --discussion "RCA complete - tracking issue $action: #$issue_number ($issue_url)" >/dev/null \
     || failed+=("ADO comment")
   replace_ado_migration_tag "$ado_id" "$MIGRATED_TAG" || failed+=("ADO tag")
-  set_tracking_issue_project_fields "$issue_number" "$ado_id" || failed+=("project board")
+  add_tracking_issue_to_project "$issue_number" || failed+=("project board")
+  set_tracking_issue_fields "$issue_number" "$ado_id" || failed+=("issue fields")
 
   echo "$issue_number"
   if [ ${#failed[@]} -gt 0 ]; then
     local IFS=,
-    echo "create_tracking_issue: issue #$issue_number created, but these follow-up steps failed: ${failed[*]} - run scripts/repair-ado.sh --live" >&2
+    echo "create_tracking_issue: issue #$issue_number $action, but these follow-up steps failed: ${failed[*]} - run scripts/repair-ado.sh --live" >&2
     return 3
   fi
 }
 
-# Adds the tracking issue to the "boostCX Delivery" org project and sets its ADO Linked
-# Tickets field (bare ADO work item id, e.g. "145237"). Returns non-zero on failure (logged);
-# create_tracking_issue reports that as a partial success rather than failing the whole issue.
-set_tracking_issue_project_fields() {
-  local issue_number="$1" ado_id="$2"
+# Adds the tracking issue to the "boostCX Delivery" org project (a no-op when it's already
+# there). Returns non-zero on failure (logged); create_tracking_issue reports that as a partial
+# success rather than failing the whole issue.
+# Args: <issue-number>
+add_tracking_issue_to_project() {
+  local issue_number="$1"
   local content_id
   content_id=$(gh issue view "$issue_number" --repo "$GITHUB_ORG/$GITHUB_REPO" --json id -q .id)
   if [ -z "$content_id" ]; then
-    echo "set_tracking_issue_project_fields: could not resolve node id for issue #$issue_number" >&2
+    echo "add_tracking_issue_to_project: could not resolve node id for issue #$issue_number" >&2
     return 1
   fi
 
@@ -498,16 +641,129 @@ set_tracking_issue_project_fields() {
     }' -f project="$BOOSTCX_DELIVERY_PROJECT_ID" -f content="$content_id" \
     -q '.data.addProjectV2ItemById.item.id' 2>&1)
   if [ -z "$item_id" ] || [[ "$item_id" == *error* ]]; then
-    echo "set_tracking_issue_project_fields: failed to add issue #$issue_number to boostCX Delivery project: $item_id" >&2
+    echo "add_tracking_issue_to_project: failed to add issue #$issue_number to boostCX Delivery project: $item_id" >&2
     return 1
   fi
-  local out
-  if ! out=$(gh api graphql -f query='
-      mutation($project: ID!, $item: ID!, $field: ID!, $value: String!) {
-        updateProjectV2ItemFieldValue(input: {projectId: $project, itemId: $item, fieldId: $field, value: {text: $value}}) { projectV2Item { id } }
-      }' -f project="$BOOSTCX_DELIVERY_PROJECT_ID" -f item="$item_id" \
-      -f field="$BOOSTCX_DELIVERY_ADO_FIELD_ID" -f value="${ado_id}" 2>&1); then
-    echo "set_tracking_issue_project_fields: added issue #$issue_number to the project but failed to set its ADO field: $out" >&2
+}
+
+# The org-level GitHub Issue Field values a tracking issue gets from its ADO bug, printed as a
+# JSON array of {name, kind, value} (kind: text|number|date|option; options are matched by
+# name). Only what the ticket actually has is included:
+#   ADO Linked Tickets <- work item id, bare (e.g. "145237"), as existing issues use it
+#   Priority           <- Microsoft.VSTS.Common.Priority, via ISSUE_FIELD_PRIORITY_MAP
+#   Severity           <- Microsoft.VSTS.Common.Severity ("3 - Medium" -> "Medium")
+#   Requested By       <- Custom.BugReportedBy (e.g. "Internal - QA"), else the ticket's creator
+#   Start date         <- Microsoft.VSTS.Scheduling.StartDate
+#   Target date        <- Microsoft.VSTS.Scheduling.TargetDate
+#   Effort - Estimate  <- Microsoft.VSTS.Scheduling.OriginalEstimate (hours), when above 0
+#   Effort - Actual    <- Microsoft.VSTS.Scheduling.CompletedWork, when above 0
+#   Workstream         <- ISSUE_FIELD_WORKSTREAM
+# Args: <work-item-json> (as `az boards work-item show` prints it)
+ado_issue_field_values() {
+  jq -c --arg prio_map "${ISSUE_FIELD_PRIORITY_MAP:-}" --arg workstream "${ISSUE_FIELD_WORKSTREAM:-}" '
+    def field(n; k; v): if (v // "") != "" then {name: n, kind: k, value: v} else empty end;
+    .fields as $f
+    | ($prio_map | split(" ") | map(select(contains("=")) | split("=") | {key: .[0], value: .[1]}) | from_entries) as $prio
+    | ($f."System.CreatedBy" | if type == "object" then .displayName else . end) as $creator
+    | [ field("ADO Linked Tickets"; "text"; .id | tostring),
+        field("Priority"; "option"; $prio[$f."Microsoft.VSTS.Common.Priority" // "" | tostring]),
+        field("Severity"; "option"; $f."Microsoft.VSTS.Common.Severity" // "" | sub("^[0-9]+ *- *"; "")),
+        field("Requested By"; "text"; $f."Custom.BugReportedBy" // $creator),
+        field("Start date"; "date"; ($f."Microsoft.VSTS.Scheduling.StartDate" // "")[0:10]),
+        field("Target date"; "date"; ($f."Microsoft.VSTS.Scheduling.TargetDate" // "")[0:10]),
+        field("Effort - Estimate"; "number"; $f."Microsoft.VSTS.Scheduling.OriginalEstimate" | select(. != null and . > 0)),
+        field("Effort - Actual"; "number"; $f."Microsoft.VSTS.Scheduling.CompletedWork" | select(. != null and . > 0)),
+        field("Workstream"; "option"; $workstream) ]' <<< "$1"
+}
+
+# Works out which of the ADO bug's Issue Field values (ado_issue_field_values) the issue is
+# still missing. Fields already set on the issue are left out, so a value someone changed by
+# hand is never overwritten. Prints {issueId, inputs, names, skipped} - inputs ready for
+# setIssueFieldValue, names of the fields they set, and values skipped because the org has no
+# such field or option - or fails.
+# Args: <issue-number> <work-item-json>
+pending_issue_fields() {
+  local issue_number="$1" item="$2" wanted catalog issue
+  wanted=$(ado_issue_field_values "$item") || return 1
+  if ! catalog=$(gh api graphql -f query='
+      query($org: String!) { organization(login: $org) { issueFields(first: 100) { nodes {
+        __typename
+        ... on IssueFieldText { id name }
+        ... on IssueFieldNumber { id name }
+        ... on IssueFieldDate { id name }
+        ... on IssueFieldSingleSelect { id name options { id name } }
+      } } } }' -f org="$GITHUB_ORG" -q '.data.organization.issueFields.nodes' 2>&1); then
+    echo "pending_issue_fields: could not list $GITHUB_ORG's issue fields: $catalog" >&2
+    return 1
+  fi
+  if ! issue=$(gh api graphql -f query='
+      query($owner: String!, $repo: String!, $n: Int!) { repository(owner: $owner, name: $repo) { issue(number: $n) {
+        id
+        issueFieldValues(first: 50) { nodes {
+          ... on IssueFieldTextValue { field { ... on IssueFieldCommon { name } } }
+          ... on IssueFieldNumberValue { field { ... on IssueFieldCommon { name } } }
+          ... on IssueFieldDateValue { field { ... on IssueFieldCommon { name } } }
+          ... on IssueFieldSingleSelectValue { field { ... on IssueFieldCommon { name } } }
+          ... on IssueFieldMultiSelectValue { field { ... on IssueFieldCommon { name } } }
+        } }
+      } } }' -f owner="$GITHUB_ORG" -f repo="$GITHUB_REPO" -F n="$issue_number" -q '.data.repository.issue' 2>&1); then
+    echo "pending_issue_fields: could not read issue #$issue_number's fields: $issue" >&2
+    return 1
+  fi
+  jq -n -c --argjson wanted "$wanted" --argjson catalog "$catalog" --argjson issue "$issue" '
+    [$issue.issueFieldValues.nodes[] | .field.name? // empty] as $set
+    | [ $wanted[] | select(.name as $n | $set | any(.[]; . == $n) | not)
+        | . as $w | ($catalog | map(select(.name == $w.name)) | first) as $field
+        | if $field == null then {skip: "\($w.name) (no such org field)"}
+          elif $w.kind == "option" then
+            (($field.options // []) | map(select(.name == $w.value)) | first) as $o
+            | if $o == null then {skip: "\($w.name)=\($w.value) (no such option)"}
+              else {name: $w.name, input: {fieldId: $field.id, singleSelectOptionId: $o.id}} end
+          elif $w.kind == "number" then {name: $w.name, input: {fieldId: $field.id, numberValue: $w.value}}
+          elif $w.kind == "date" then {name: $w.name, input: {fieldId: $field.id, dateValue: $w.value}}
+          else {name: $w.name, input: {fieldId: $field.id, textValue: $w.value}} end ] as $r
+    | {issueId: $issue.id, inputs: [$r[] | .input // empty], names: [$r[] | .name // empty],
+       skipped: [$r[] | .skip // empty]}'
+}
+
+# Sets <input-json-array> on the issue in one setIssueFieldValue call, or fails.
+# Args: <issue-node-id> <input-json-array>
+_set_issue_field_values() {
+  jq -n -c --arg id "$1" --argjson inputs "$2" '{
+    query: "mutation($input: SetIssueFieldValueInput!) { setIssueFieldValue(input: $input) { clientMutationId } }",
+    variables: {input: {issueId: $id, issueFields: $inputs}}}' | gh api graphql --input - 2>&1 >/dev/null
+}
+
+# Fills the tracking issue's org-level Issue Fields from its ADO bug (ado_issue_field_values),
+# setting only fields the issue doesn't have yet. Values with no matching org field/option are
+# logged and skipped. If the batched update is rejected, each field is retried on its own so
+# one bad value can't keep the rest (ADO Linked Tickets above all) from being set. Returns
+# non-zero when any field couldn't be set (logged); create_tracking_issue reports that as a
+# partial success.
+# Args: <issue-number> <ado-id> [<work-item-json>] - the ADO ticket is fetched when not given
+set_tracking_issue_fields() {
+  local issue_number="$1" ado_id="$2" item="${3:-}" pending out input failed=()
+  if [ -z "$item" ]; then
+    item=$(az_retry boards work-item show --id "$ado_id" --organization "$ADO_ORG" -o json) || return 1
+  fi
+  pending=$(pending_issue_fields "$issue_number" "$item") || return 1
+  if [ "$(jq '.skipped | length' <<< "$pending")" -gt 0 ]; then
+    echo "set_tracking_issue_fields: issue #$issue_number - skipped $(jq -r '.skipped | join(", ")' <<< "$pending")" >&2
+  fi
+  [ "$(jq '.inputs | length' <<< "$pending")" -eq 0 ] && return 0
+
+  local issue_id count i
+  issue_id=$(jq -r '.issueId' <<< "$pending")
+  out=$(_set_issue_field_values "$issue_id" "$(jq -c '.inputs' <<< "$pending")") && return 0
+  count=$(jq '.inputs | length' <<< "$pending")
+  for ((i = 0; i < count; i++)); do
+    input=$(jq -c --argjson i "$i" '[.inputs[$i]]' <<< "$pending")
+    _set_issue_field_values "$issue_id" "$input" >/dev/null \
+      || failed+=("$(jq -r --argjson i "$i" '.names[$i]' <<< "$pending")")
+  done
+  if [ ${#failed[@]} -gt 0 ]; then
+    local IFS=,
+    echo "set_tracking_issue_fields: issue #$issue_number - could not set ${failed[*]}: $out" >&2
     return 1
   fi
 }

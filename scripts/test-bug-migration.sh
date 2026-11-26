@@ -9,7 +9,8 @@ issue_count=$(gh issue list --repo "$GITHUB_ORG/$GITHUB_REPO" --label "$GITHUB_I
 log "Open bug issues in $GITHUB_ORG/$GITHUB_REPO: $issue_count"
 
 log "Verifying ADO -> GitHub mapping..."
-mapped_count=$(jq 'length' "$ADO_MAP_FILE")
+mapped_count=0
+[ ! -f "$ADO_MAP_FILE" ] || mapped_count=$(jq 'length' "$ADO_MAP_FILE")
 log "Bugs migrated (state/ado-to-github-map.json): $mapped_count"
 
 log "Verifying shared investigation worktree was cleaned up..."
@@ -19,7 +20,7 @@ else
   stale_worktrees=0
 fi
 if [ "$stale_worktrees" -gt 0 ]; then
-  log "WARNING: $stale_worktrees leftover shared investigation worktree(s) found - a prior run likely crashed before cleanup"
+  log "WARNING: $stale_worktrees leftover shared investigation worktree(s) found - a prior run crashed before cleanup, or kept it for panes left open for inspection (the next run reuses it)"
 else
   log "No leftover shared investigation worktree found."
 fi

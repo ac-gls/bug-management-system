@@ -44,25 +44,47 @@ issue (timeout, agent confusion, missing repo access) is understood.
 issue title (`Fix: <title>`) - it does not parse this out of the agent's report. If it's wrong,
 check the ADO ticket's `System.Title` field, not the report content.
 
-### A bug never gets investigated even though it's tagged `MigrateToGitHub`
+### A bug never gets investigated even though it has a migration or rerun tag
 
-Check `state/ado-to-github-map.json` - a bug already mapped to an issue number, or marked
-`BLOCKED` / `ALREADY_FIXED`, is skipped by `get-ado-bugs.sh` on every subsequent run. Clear its
-entry (and re-add the `MigrateToGitHub` tag in ADO - the pipeline swaps it to
-`RequiresAdditionalInformation` or `AlreadyFixed`) to have it picked up again.
+The query requires the configured intake state, `ADO_NEW_STATE` (currently `Triaged`), and
+either `MigrateToGitHub` or `ReRunRequested` (configurable via `RERUN_REQUESTED_TAG`). A bug
+already mapped to an issue number, or marked `BLOCKED` / `ALREADY_FIXED` in
+`state/ado-to-github-map.json`, is skipped for ordinary migration.
+
+To investigate it again, add `ReRunRequested` and return it to the intake state. This bypasses
+the existing map; no manual clearing is needed. Run migration with `--live` when ready.
+`--limit` still means a count of bugs, not a per-ID selector.
+
+With an existing numeric GitHub issue link, a new plan saves the previous issue body as a
+comment, updates its title/body, and reopens it if closed. Without a linked issue, it creates
+one. A blocked or already-fixed rerun posts the ADO outcome but does not automatically close
+or reopen the old GitHub issue. Its link is retained in `state/ado-rerun-state.json` for future
+reruns, even when the map now holds `BLOCKED` or `ALREADY_FIXED`.
+
+On completion, the request, migration, and previous outcome tags are replaced by the latest
+outcome tag; unrelated tags are preserved. Failed investigations keep the request tag and
+return to the intake state. The rerun ledger records pending/completed requests and linked
+issues; `state/ado-outcome-history.json` records outcome transitions. Dry runs do not write
+remote data or any of these state files (including the map).
+
+Manual map clearing and re-adding the migration tag is a last-resort reset, not the rerun
+workflow: it can create duplicate GitHub issues instead of updating the existing one.
 
 ### A bug fails with "report missing: ..."
 
 The agent's report lacked one or more `REQUIRED_REPORT_SECTIONS` headings, so no issue was
 created - an incomplete plan can't be implemented from later. The report is kept at
-`temp/rca-<ado-id>.md` and the pane is left open. The ADO ticket is set back to `New`
-automatically, so the next run retries it - or adjust `REQUIRED_REPORT_SECTIONS` in
+`temp/rca-<ado-id>.md` and the pane is left open. The ADO ticket is set back to
+`ADO_NEW_STATE` (currently `Triaged`) automatically, retaining any rerun request tag so the
+next run retries it - or adjust `REQUIRED_REPORT_SECTIONS` in
 `configs/system.local.conf` if the required set is wrong.
 
 ### A bug shows `issue-partial`, or "ADO tag update FAILED"
 
-The tracking issue (or the blocker/already-fixed comment) was created, but a follow-up step -
-the ADO comment, the ADO tag swap, or adding the issue to the project board - failed; the bug's
+The tracking issue was created or updated (or the blocker/already-fixed comment was posted),
+but a follow-up step -
+the ADO comment, the ADO tag swap, adding the issue to the project board, or setting its issue
+fields (ADO Linked Tickets, Priority, Severity, ...) - failed; the bug's
 log names which and why. Nothing is lost: run
 
 ```bash
@@ -71,14 +93,20 @@ log names which and why. Nothing is lost: run
 ./scripts/repair-ado.sh --live 145658   # or just specific bugs
 ```
 
-It checks every bug in `state/ado-to-github-map.json` against ADO and GitHub. The project-board
-check needs the gh login's `project` scope (`./scripts/authenticate.sh` adds it).
+It checks mapped bugs against ADO and GitHub, skipping queued or in-progress rerun requests
+so repair does not consume their request tags or restore stale outcomes. Completed partial
+reruns can be repaired, including recovering a failed map write from the recorded completion
+outcome. Check `state/ado-rerun-state.json` if a bug is intentionally skipped.
+The project-board check needs the gh login's `project` scope (`./scripts/authenticate.sh`
+adds it). Issue fields are only filled where empty - a value someone set by hand is never
+overwritten.
 
 ### A failed bug is still `Active` in ADO
 
-Failed and unfinished bugs are returned to `New` automatically. If that write itself fails, the
-bug's status says "could not reset ADO to New" and its log has a WARNING - set it to `New` by
-hand to have it retried.
+Failed and unfinished bugs are returned to `ADO_NEW_STATE` (currently `Triaged`)
+automatically, with any rerun request tag retained. If that write itself fails, the bug's
+status reports the reset failure and its log has a WARNING - set it to the configured intake
+state by hand to have it retried.
 
 ### Leftover worktree under `$APP_WORKTREE_DIR`
 

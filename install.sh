@@ -183,6 +183,7 @@ CONFIGURE_VARS=(
   ADO_ORG                "Azure DevOps organization URL"
   ADO_PROJECT            "Azure DevOps project"
   MIGRATION_TAG          "ADO tag that marks bugs to migrate"
+  RERUN_REQUESTED_TAG    "ADO tag that requests fresh investigation"
   DEFAULT_LIMIT          "Bugs processed per run by default"
   MAX_PARALLEL_INVESTIGATIONS "Max bugs investigated at once"
 )
@@ -243,7 +244,7 @@ run_checks() {
   local var
   for var in GITHUB_ORG GITHUB_REPO APP_REPO_URL APP_REPO_DIR APP_WORKTREE_DIR ADO_ORG \
              ADO_PROJECT ADO_WORK_ITEM_TYPE ADO_NEW_STATE ADO_ACTIVE_STATE MIGRATION_TAG \
-             MIGRATED_TAG BLOCKED_TAG RCA_AGENT_NAME HERDR_AGENT_KIND DEFAULT_BASE_BRANCH; do
+             MIGRATED_TAG BLOCKED_TAG RERUN_REQUESTED_TAG RCA_AGENT_NAME HERDR_AGENT_KIND DEFAULT_BASE_BRANCH; do
     [ -n "${!var:-}" ] || fail "configs/system.conf: $var is empty"
   done
   pass "configs/system.conf loaded (workspace: $WORKSPACE_ROOT)"
