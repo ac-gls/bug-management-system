@@ -12,17 +12,18 @@ tracking issue (or commenting back on ADO) from what they find.
 
 ## How it fits together
 
-1. **Migration** (`start-bug-migration.sh`): finds ADO bugs tagged `MigrateToGitHub`, checks out
+1. **Migration** (`start-bug-migration.sh`): finds ADO bugs in the configured intake state
+   (`ADO_NEW_STATE`, currently `Triaged`) tagged `MigrateToGitHub` or `ReRunRequested`, checks out
    one shared, read-only worktree for the whole run (detached HEAD on `origin/<branch>` - the
    RCA agent never writes code, so every bug in the run can safely read the same checkout
    concurrently instead of each getting its own), then opens one live `claude` agent per bug
-   against it and asks it to run `bcx-bug-rca-agent` directly against the ADO ticket - no
-   GitHub issue exists yet. The agent stops after producing a resolution plan; it never writes
+   against it and asks it to run `bcx-bug-rca-agent` directly against the ADO ticket - before
+   creating or updating the GitHub tracking issue. The agent stops after producing a resolution plan; it never writes
    code. The shared worktree is removed once every bug in the run has finished investigating -
    it only exists to isolate this run's code snapshot from whatever else is happening in the
    app repo (your own separate work in another app). Exactly one of three things happens as
    the deterministic final step (otherwise the bug fails and its pane is left open):
-   - A complete plan was produced -> the **tracking GitHub issue is created from that report**
+   - A complete plan was produced -> the **tracking GitHub issue is created or updated from that report**
      (title `Fix: <bug title>`), rendered through `templates/tracking-issue.md`, which adds the
      commit that was investigated and the `ADO-#<id>` link. The report must contain every
      heading in `REQUIRED_REPORT_SECTIONS` (Root Cause Analysis, Resolution Plan, Root Cause
@@ -33,8 +34,8 @@ tracking issue (or commenting back on ADO) from what they find.
      investigate) -> **no GitHub issue is created**; instead a comment is posted on the ADO
      ticket saying more information is required, with the specific blocker detail. The bug is
      marked `BLOCKED` in `state/ado-to-github-map.json` so it isn't re-investigated and
-     re-commented on every future run - clear that entry once the ticket has enough
-     information to retry.
+     re-commented on every future run - request a rerun once the ticket has enough
+     information (see below); no map entry needs clearing.
    - The agent found the bug **already fixed** in the investigated code -> **no GitHub issue
      is created**; its evidence (which commit fixed it, how it verified that) is posted as an
      ADO comment, the tag becomes `AlreadyFixed`, and the bug is marked `ALREADY_FIXED` in the
@@ -45,7 +46,8 @@ tracking issue (or commenting back on ADO) from what they find.
    approving or assigning fixes is out of this repo's scope.
 
 Everything defaults to a **dry run** (`--limit 1`, no `--live`) so you can review exactly what
-would be created before anything touches real ADO tickets or GitHub issues.
+would be created or updated. Dry runs do not write remote data, the map, the rerun ledger,
+or outcome history.
 
 The shared investigation worktree is based on `main` by default - pass `--branch <name>` to
 target a different base for bugs that live on a different branch (it's a detached checkout of
@@ -64,7 +66,8 @@ invocation and isn't persisted anywhere.
 - `docs/` - user guide, process summary, migration process, troubleshooting, and a from-scratch
   setup walkthrough (see Documentation below)
 - `state/` - `ado-to-github-map.json` (which ADO bugs have a GitHub issue, or are `BLOCKED` /
-  `ALREADY_FIXED`)
+  `ALREADY_FIXED`), `ado-rerun-state.json` (pending/completed reruns and retained linked issue),
+  and `ado-outcome-history.json` (outcome transitions)
 - `templates/` - `tracking-issue.md`, the body of every tracking issue (`TRACKING_ISSUE_TEMPLATE`)
 - `logs/`, `temp/` - runtime output
 - `win-scripts/` - `install.bat` / `run.bat`, for launching from Windows via WSL
@@ -111,8 +114,27 @@ by hand - gitignored, sourced after `system.conf`) instead of editing the tracke
 ./scripts/run-full-process.sh --limit 5 --live
 ```
 
+`--limit` is a count of bugs to process, not an ADO ID selector.
+
+### Requesting a fresh investigation
+
+Add `ReRunRequested` (configurable via `RERUN_REQUESTED_TAG`) to the ADO bug and set its state
+to `ADO_NEW_STATE` (currently `Triaged`), then run migration normally. The request bypasses
+any existing map entry; do not clear the map manually.
+
+If a numeric GitHub issue link exists, a new resolution plan reuses it: the previous body is
+saved as a comment, the title/body are updated, and a closed issue is reopened. Without a
+linked issue, a new issue is created. A blocked or already-fixed result posts the ADO outcome
+without automatically closing or reopening the old issue; its link remains in the rerun
+ledger for a future request.
+
+Only on completion are the request, migration, and old outcome tags replaced by the latest
+outcome tag; unrelated tags are preserved. Failed investigations keep the request tag and
+return to the intake state for retry.
+
 If a run reports `issue-partial` or a failed ADO tag update, `./scripts/repair-ado.sh --live`
 completes the missing ADO comment / tag / project-board steps (dry run without `--live`).
+Repair skips queued or in-progress rerun requests but repairs completed partial results.
 
 Individual steps (each script's header comment documents its exact behavior): `get-ado-bugs.sh`,
 `start-parallel-investigation.sh` (creates the tracking issue itself, via
@@ -129,6 +151,13 @@ were created and the shared worktree was cleaned up).
 If any doc and the actual code disagree, `scripts/*.sh` header comments are authoritative.
 
 ## Contributing
+
+Run the offline rerun regression tests (mocked ADO/GitHub; no service credentials needed):
+
+```bash
+./scripts/test-rerun-requested.sh
+```
+
 1. Fork the repository
 2. Create a feature branch
 3. Commit your changes

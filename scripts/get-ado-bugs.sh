@@ -1,6 +1,7 @@
 #!/bin/bash
-# Queries Azure DevOps for $ADO_NEW_STATE-state $ADO_WORK_ITEM_TYPE work items tagged $MIGRATION_TAG,
-# excludes bugs already migrated (tracked in state/ado-to-github-map.json), and writes the result
+# Queries intake-state bugs tagged $MIGRATION_TAG or $RERUN_REQUESTED_TAG.
+# Explicit rerun requests bypass the existing outcome map; normal migration does not.
+# Writes the result
 # to $ADO_BUGS_FILE. Each collected bug's ADO State is set to $ADO_ACTIVE_STATE,
 # which also drops it out of this query on future runs. Dry-run unless --live is passed.
 #
@@ -9,13 +10,13 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 parse_common_args "$@"
 
-WIQL="SELECT [System.Id],[System.Title],[System.Description],[System.Tags],[System.State] FROM WorkItems WHERE [System.WorkItemType]='$ADO_WORK_ITEM_TYPE' AND [System.Tags] CONTAINS '$MIGRATION_TAG' AND [System.State] = '$ADO_NEW_STATE'"
+WIQL="SELECT [System.Id],[System.Title],[System.Description],[System.Tags],[System.State] FROM WorkItems WHERE [System.WorkItemType]='$ADO_WORK_ITEM_TYPE' AND ([System.Tags] CONTAINS '$MIGRATION_TAG' OR [System.Tags] CONTAINS '$RERUN_REQUESTED_TAG') AND [System.State] = '$ADO_NEW_STATE'"
 
 # Never leave a previous run's results behind - if anything below fails, there must be no
 # $ADO_BUGS_FILE for start-parallel-investigation.sh to pick up.
 rm -f "$ADO_BUGS_FILE"
 
-log "Querying ADO ($ADO_ORG / $ADO_PROJECT) for bugs tagged '$MIGRATION_TAG'..."
+log "Querying ADO ($ADO_ORG / $ADO_PROJECT) for bugs tagged '$MIGRATION_TAG' or '$RERUN_REQUESTED_TAG'..."
 
 query_result=$(az boards query --organization "$ADO_ORG" --project "$ADO_PROJECT" --wiql "$WIQL" -o json 2>&1)
 if [ $? -ne 0 ]; then
@@ -26,13 +27,13 @@ fi
 
 ids=$(echo "$query_result" | jq -r '.[].id')
 if [ -z "$ids" ]; then
-  log "No bugs found tagged '$MIGRATION_TAG'."
+  log "No bugs found tagged '$MIGRATION_TAG' or '$RERUN_REQUESTED_TAG'."
   echo "[]" > "$ADO_BUGS_FILE"
   exit 0
 fi
 
 total_found=$(echo "$ids" | wc -w)
-log "Found $total_found bug(s) tagged '$MIGRATION_TAG' total (before limit/already-tracked filtering)"
+log "Found $total_found bug(s) tagged '$MIGRATION_TAG' or '$RERUN_REQUESTED_TAG' total (before limit/already-tracked filtering)"
 
 bugs_json="[]"
 count=0
@@ -51,30 +52,45 @@ return_collected_on_abort() {
 trap return_collected_on_abort EXIT
 trap 'exit 130' INT TERM
 for id in $ids; do
+  if ! item=$(az boards work-item show --id "$id" --organization "$ADO_ORG" -o json); then
+    log "Bug $id: failed to fetch work item - skipping (left in $ADO_NEW_STATE for a future run)"
+    continue
+  fi
+  # WIQL CONTAINS can match tag substrings; require exact tag membership and recheck state.
+  tags=$(jq -r '.fields."System.Tags" // ""' <<< "$item")
+  [ "$(jq -r '.fields."System.State"' <<< "$item")" = "$ADO_NEW_STATE" ] || continue
+  rerun=false
+  has_tag "$tags" "$RERUN_REQUESTED_TAG" && rerun=true
+  if [ "$rerun" != true ] && ! has_tag "$tags" "$MIGRATION_TAG"; then continue; fi
   existing=$(ado_map_get "$id")
-  if [ -n "$existing" ]; then
+  if [ -n "$existing" ] && [ "$rerun" != true ]; then
     already_tracked=$((already_tracked + 1))
     if [ "$existing" = "BLOCKED" ]; then
-      log "Bug $id previously hit a blocker (needs more info) - skipping until state/ado-to-github-map.json is cleared for it"
+      log "Bug $id previously hit a blocker (needs more info) - add $RERUN_REQUESTED_TAG to request a fresh investigation"
     elif [ "$existing" = "ALREADY_FIXED" ]; then
-      log "Bug $id was found already fixed - skipping until state/ado-to-github-map.json is cleared for it"
+      log "Bug $id was found already fixed - add $RERUN_REQUESTED_TAG to request a fresh investigation"
     else
       log "Bug $id already migrated -> GitHub issue #$existing, skipping"
     fi
     continue
   fi
 
-  if ! item=$(az boards work-item show --id "$id" --organization "$ADO_ORG" -o json); then
-    # Skip rather than abort: bugs already collected this run have been set Active and must
-    # still reach $ADO_BUGS_FILE. This one is left $ADO_NEW_STATE, so the next run picks it up.
-    log "Bug $id: failed to fetch work item - skipping (left in $ADO_NEW_STATE for a future run)"
-    continue
+  linked_issue=$(ado_linked_issue "$id")
+  if [ "$rerun" = true ]; then
+    log "Bug $id: explicit rerun requested (previous outcome: ${existing:-none}; linked issue: ${linked_issue:-none})"
+    if [ "$LIVE" = true ] && ! ado_rerun_set "$id" pending "$linked_issue"; then
+      log "Bug $id: could not persist rerun request - skipping"
+      continue
+    fi
   fi
   # This org's Bug work items don't populate System.Description - the real content lives in
   # Microsoft.VSTS.TCM.ReproSteps plus custom fields. _links.html.href isn't present on this
   # API response shape either, so the human-facing URL is constructed directly.
-  entry=$(echo "$item" | jq -c --arg org "$ADO_ORG" --arg project "$ADO_PROJECT" '{
+  entry=$(echo "$item" | jq -c --arg org "$ADO_ORG" --arg project "$ADO_PROJECT" \
+    --argjson rerun "$rerun" --arg linked_issue "$linked_issue" '{
     id: (.id | tostring),
+    rerun_requested: $rerun,
+    linked_issue: $linked_issue,
     title: .fields."System.Title",
     description: (.fields."System.Description" // .fields."Microsoft.VSTS.TCM.ReproSteps" // ""),
     expected_results: (.fields."Custom.ExpectedResults" // ""),
@@ -85,13 +101,14 @@ for id in $ids; do
     state: .fields."System.State",
     url: ($org + "/" + ($project | @uri) + "/_workitems/edit/" + (.id | tostring))
   }')
-  bugs_json=$(echo "$bugs_json" | jq --argjson e "$entry" '. + [$e]')
-  count=$((count + 1))
   if set_ado_active "$id"; then
     collected_ids+=("$id")
   else
-    log "Bug $id: failed to set ADO state to $ADO_ACTIVE_STATE (continuing)"
+    log "Bug $id: failed to set ADO state to $ADO_ACTIVE_STATE - skipping to avoid investigating an unclaimed request"
+    continue
   fi
+  bugs_json=$(echo "$bugs_json" | jq --argjson e "$entry" '. + [$e]')
+  count=$((count + 1))
   if [ "$count" -ge "$LIMIT" ]; then
     break
   fi
