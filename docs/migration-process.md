@@ -22,8 +22,10 @@ is your team's own process.
 
 ## Phase 1: Query ADO (`get-ado-bugs.sh`)
 
-- Runs a WIQL query against `$ADO_ORG`/`$ADO_PROJECT` for Bug work items in the `New` state tagged
-  `$MIGRATION_TAG` (default `MigrateToGitHub`).
+- Runs a WIQL query against `$ADO_ORG`/`$ADO_PROJECT` for Bug work items in `$ADO_NEW_STATE`
+  (default `Triaged`) tagged `$MIGRATION_TAG` (default `MigrateToGitHub`) or
+  `$RERUN_REQUESTED_TAG` (default `ReRunRequested`), plus bugs in `$ADO_REOPENED_STATE`
+  (default `Re-opened`) tagged `$RERUN_REQUESTED_TAG`.
 - Skips bugs already recorded in `state/ado-to-github-map.json` (already migrated, or
   previously `BLOCKED` pending more information).
 - For each remaining bug (up to `--limit N`), fetches the full work item and writes a

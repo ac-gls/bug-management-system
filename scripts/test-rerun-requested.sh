@@ -162,12 +162,14 @@ collect_fixture() {
   item 9 'MigrateToGitHub; AlreadyFixed'
   item 10 'MigrateToGitHub' 'New'
   item 11 'MigrateToGitHubExtra'
-  echo '[{"id":1},{"id":2},{"id":3},{"id":4},{"id":5},{"id":6},{"id":7},{"id":8},{"id":9},{"id":10},{"id":11}]' > "$SANDBOX/fixtures/query.json"
+  item 12 'ReRunRequested' 'Re-opened'
+  item 13 'MigrateToGitHub' 'Re-opened'
+  echo '[{"id":1},{"id":2},{"id":3},{"id":4},{"id":5},{"id":6},{"id":7},{"id":8},{"id":9},{"id":10},{"id":11},{"id":12},{"id":13}]' > "$SANDBOX/fixtures/query.json"
 }
 assert_collection() {
-  assert_json "$ADO_BUGS_FILE" 'map(.id) == ["1","6","7"] and .[0].rerun_requested == true and .[0].linked_issue == "42" and .[1].rerun_requested == true and .[1].linked_issue == "66" and .[2].rerun_requested == false'
+  assert_json "$ADO_BUGS_FILE" 'map(.id) == ["1","6","7","12"] and .[0].rerun_requested == true and .[0].linked_issue == "42" and .[1].rerun_requested == true and .[1].linked_issue == "66" and .[2].rerun_requested == false and .[3].rerun_requested == true'
   local query; query=$(cat "$SANDBOX/fixtures/query.txt")
-  [[ "$query" == *"AND ([System.Tags] CONTAINS 'MigrateToGitHub' OR [System.Tags] CONTAINS 'ReRunRequested') AND [System.State] = 'Triaged'"* ]] || fail "incorrect WIQL: $query"
+  [[ "$query" == *"AND (([System.Tags] CONTAINS 'MigrateToGitHub' AND [System.State] = 'Triaged') OR ([System.Tags] CONTAINS 'ReRunRequested' AND [System.State] IN ('Triaged', 'Re-opened')))"* ]] || fail "incorrect WIQL: $query"
 }
 test_tags() {
   has_tag 'Other;  rErUnReQuEsTeD ; tail' ReRunRequested
@@ -190,8 +192,8 @@ test_collector_live() {
   assert_collection
   assert_equal "$(cat "$ADO_MAP_FILE")" "$map"
   assert_equal "$(cat "$ADO_HISTORY_FILE")" "$history"
-  assert_json "$ADO_RERUN_FILE" '.["1"] == {status:"pending",issue:"42",outcome:"42"} and .["6"] == {status:"pending",issue:"66",outcome:"66"} and keys == ["1","6"]'
-  assert_calls '[.[] | select(.[0:4] == ["az","boards","work-item","update"]) | .[index("--id")+1]] == ["1","6","7"]'
+  assert_json "$ADO_RERUN_FILE" '.["1"] == {status:"pending",issue:"42",outcome:"42"} and .["6"] == {status:"pending",issue:"66",outcome:"66"} and keys == ["1","12","6"]'
+  assert_calls '[.[] | select(.[0:4] == ["az","boards","work-item","update"]) | .[index("--id")+1]] == ["1","6","7","12"]'
 }
 prepare_link() {
   item 1 'Unrelated; ReRunRequested; MigrateToGitHub; MigratedToGitHub; RequiresAdditionalInformation; AlreadyFixed'

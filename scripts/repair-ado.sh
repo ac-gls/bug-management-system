@@ -83,7 +83,7 @@ for ado_id in "${ids[@]}"; do
   # Never restore the old outcome over a newly queued or running investigation.
   # Completed reruns left active with a failed tag update can still be repaired.
   if [ "$rerun_status" = pending ] || { has_tag "$tags" "$RERUN_REQUESTED_TAG" \
-    && { [ "$(jq -r '.fields."System.State"' <<< "$item")" = "$ADO_NEW_STATE" ] || [ "$rerun_status" != completed ]; }; }; then
+    && { is_rerun_intake_state "$(jq -r '.fields."System.State"' <<< "$item")" || [ "$rerun_status" != completed ]; }; }; then
     log "[$ado_id] rerun queued/in progress - skipping repair of the previous outcome"
     continue
   fi

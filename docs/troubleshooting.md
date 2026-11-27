@@ -48,10 +48,13 @@ check the ADO ticket's `System.Title` field, not the report content.
 
 The query requires the configured intake state, `ADO_NEW_STATE` (currently `Triaged`), and
 either `MigrateToGitHub` or `ReRunRequested` (configurable via `RERUN_REQUESTED_TAG`). A bug
+tagged `ReRunRequested` is also collected from `ADO_REOPENED_STATE` (currently `Re-opened`);
+`MigrateToGitHub` alone is not. A bug
 already mapped to an issue number, or marked `BLOCKED` / `ALREADY_FIXED` in
 `state/ado-to-github-map.json`, is skipped for ordinary migration.
 
-To investigate it again, add `ReRunRequested` and return it to the intake state. This bypasses
+To investigate it again, add `ReRunRequested` and leave it in (or return it to) the intake or
+re-opened state. This bypasses
 the existing map; no manual clearing is needed. Run migration with `--live` when ready.
 `--limit` still means a count of bugs, not a per-ID selector.
 
