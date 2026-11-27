@@ -1,5 +1,6 @@
 #!/bin/bash
-# Queries intake-state bugs tagged $MIGRATION_TAG or $RERUN_REQUESTED_TAG.
+# Queries intake-state bugs tagged $MIGRATION_TAG or $RERUN_REQUESTED_TAG, plus re-opened
+# ($ADO_REOPENED_STATE) bugs tagged $RERUN_REQUESTED_TAG.
 # Explicit rerun requests bypass the existing outcome map; normal migration does not.
 # Writes the result
 # to $ADO_BUGS_FILE. Each collected bug's ADO State is set to $ADO_ACTIVE_STATE,
@@ -10,7 +11,10 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 parse_common_args "$@"
 
-WIQL="SELECT [System.Id],[System.Title],[System.Description],[System.Tags],[System.State] FROM WorkItems WHERE [System.WorkItemType]='$ADO_WORK_ITEM_TYPE' AND ([System.Tags] CONTAINS '$MIGRATION_TAG' OR [System.Tags] CONTAINS '$RERUN_REQUESTED_TAG') AND [System.State] = '$ADO_NEW_STATE'"
+# Migration requests come from $ADO_NEW_STATE only; rerun requests also from $ADO_REOPENED_STATE.
+RERUN_STATES="'$ADO_NEW_STATE'"
+[ -n "${ADO_REOPENED_STATE:-}" ] && RERUN_STATES="$RERUN_STATES, '$ADO_REOPENED_STATE'"
+WIQL="SELECT [System.Id],[System.Title],[System.Description],[System.Tags],[System.State] FROM WorkItems WHERE [System.WorkItemType]='$ADO_WORK_ITEM_TYPE' AND (([System.Tags] CONTAINS '$MIGRATION_TAG' AND [System.State] = '$ADO_NEW_STATE') OR ([System.Tags] CONTAINS '$RERUN_REQUESTED_TAG' AND [System.State] IN ($RERUN_STATES)))"
 
 # Never leave a previous run's results behind - if anything below fails, there must be no
 # $ADO_BUGS_FILE for start-parallel-investigation.sh to pick up.
@@ -58,10 +62,10 @@ for id in $ids; do
   fi
   # WIQL CONTAINS can match tag substrings; require exact tag membership and recheck state.
   tags=$(jq -r '.fields."System.Tags" // ""' <<< "$item")
-  [ "$(jq -r '.fields."System.State"' <<< "$item")" = "$ADO_NEW_STATE" ] || continue
+  state=$(jq -r '.fields."System.State"' <<< "$item")
   rerun=false
-  has_tag "$tags" "$RERUN_REQUESTED_TAG" && rerun=true
-  if [ "$rerun" != true ] && ! has_tag "$tags" "$MIGRATION_TAG"; then continue; fi
+  has_tag "$tags" "$RERUN_REQUESTED_TAG" && is_rerun_intake_state "$state" && rerun=true
+  if [ "$rerun" != true ] && { [ "$state" != "$ADO_NEW_STATE" ] || ! has_tag "$tags" "$MIGRATION_TAG"; }; then continue; fi
   existing=$(ado_map_get "$id")
   if [ -n "$existing" ] && [ "$rerun" != true ]; then
     already_tracked=$((already_tracked + 1))

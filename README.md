@@ -13,7 +13,8 @@ tracking issue (or commenting back on ADO) from what they find.
 ## How it fits together
 
 1. **Migration** (`start-bug-migration.sh`): finds ADO bugs in the configured intake state
-   (`ADO_NEW_STATE`, currently `Triaged`) tagged `MigrateToGitHub` or `ReRunRequested`, checks out
+   (`ADO_NEW_STATE`, currently `Triaged`) tagged `MigrateToGitHub` or `ReRunRequested`, plus
+   re-opened bugs (`ADO_REOPENED_STATE`, currently `Re-opened`) tagged `ReRunRequested`, checks out
    one shared, read-only worktree for the whole run (detached HEAD on `origin/<branch>` - the
    RCA agent never writes code, so every bug in the run can safely read the same checkout
    concurrently instead of each getting its own), then opens one live `claude` agent per bug
@@ -118,8 +119,9 @@ by hand - gitignored, sourced after `system.conf`) instead of editing the tracke
 
 ### Requesting a fresh investigation
 
-Add `ReRunRequested` (configurable via `RERUN_REQUESTED_TAG`) to the ADO bug and set its state
-to `ADO_NEW_STATE` (currently `Triaged`), then run migration normally. The request bypasses
+Add `ReRunRequested` (configurable via `RERUN_REQUESTED_TAG`) to the ADO bug with its state
+at `ADO_NEW_STATE` (currently `Triaged`) or `ADO_REOPENED_STATE` (currently `Re-opened`), then
+run migration normally. The request bypasses
 any existing map entry; do not clear the map manually.
 
 If a numeric GitHub issue link exists, a new resolution plan reuses it: the previous body is

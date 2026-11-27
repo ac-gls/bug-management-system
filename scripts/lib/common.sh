@@ -248,6 +248,11 @@ has_tag() {
     $tags | split(";") | any(.[]; (gsub("^\\s+|\\s+$"; "") | ascii_downcase) == ($want | ascii_downcase))' >/dev/null
 }
 
+# A rerun request is collected from the intake state or the re-opened state.
+is_rerun_intake_state() {
+  [ "$1" = "$ADO_NEW_STATE" ] || { [ -n "${ADO_REOPENED_STATE:-}" ] && [ "$1" = "$ADO_REOPENED_STATE" ]; }
+}
+
 ADO_MAP_FILE="$STATE_DIR/ado-to-github-map.json"
 ADO_RERUN_FILE="$STATE_DIR/ado-rerun-state.json"
 ADO_HISTORY_FILE="$STATE_DIR/ado-outcome-history.json"
